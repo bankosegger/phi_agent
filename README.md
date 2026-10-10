@@ -30,6 +30,14 @@ Start with a task, then continue chatting:
 npm run agent -- "create hello.js and run it"
 ```
 
+## Safety
+
+File tools are limited to relative paths inside the project. Absolute paths and `..` traversal are blocked.
+
+Root-level writes like `hello.js` are blocked. Project writes must go in a subfolder like `src/hello.js`.
+
+Generated files/assets should use `write_asset`; they go under `.agent/assets/`, which is gitignored and cleared at the start and end of each CLI session.
+
 ## Test
 
 ```bash

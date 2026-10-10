@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "vitest run",
     "agent": "node agent.mjs"
   },
   "keywords": [],
@@ -12,7 +12,11 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "chalk": "^6.0.1",
     "dotenv": "^18.0.7",
     "openai": "^7.32.0"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.3"
   }
 }

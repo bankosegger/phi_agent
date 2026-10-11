@@ -27,13 +27,17 @@ async function confirmTool(name, args) {
 }
 
 async function runTask(task) {
-  return agentTurn({
-    task,
-    openai,
-    messages,
-    confirmTool,
-    log: (message) => console.log(chalk.dim(message)),
-  });
+  try {
+    return await agentTurn({
+      task,
+      openai,
+      messages,
+      confirmTool,
+      log: (message) => console.log(chalk.dim(message)),
+    });
+  } catch (error) {
+    return chalk.red(`[error] ${error.message}`);
+  }
 }
 
 const firstTask = process.argv.slice(2).join(" ");

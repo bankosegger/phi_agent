@@ -1,8 +1,10 @@
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 const ASSET_DIR = ".agent/assets";
+const SHELL_TIMEOUT_MS = 30_000;
+const MAX_TOOL_OUTPUT = 10_000;
 
 export const tools = [
   {
@@ -103,15 +105,38 @@ function safeAssetPath(path) {
   return fullPath;
 }
 
-function rejectRootLevelWrite(path) {
-  if (!path.includes("/")) {
+function rejectRootLevelWrite(fullPath) {
+  if (dirname(relative(process.cwd(), fullPath)) === ".") {
     throw new Error("Root-level writes are blocked. Use write_asset for generated files, or write inside a project folder like src/.");
   }
 }
 
+function truncate(text) {
+  if (text.length <= MAX_TOOL_OUTPUT) return text;
+  return `${text.slice(0, MAX_TOOL_OUTPUT)}\n[truncated ${text.length - MAX_TOOL_OUTPUT} chars]`;
+}
+
+function runShell(cmd) {
+  const result = spawnSync(cmd, {
+    shell: true,
+    encoding: "utf8",
+    timeout: SHELL_TIMEOUT_MS,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+
+  const parts = [];
+  if (result.stdout) parts.push(result.stdout);
+  if (result.stderr) parts.push(`[stderr]\n${result.stderr}`);
+  if (result.error?.code === "ETIMEDOUT") parts.push(`[timed out after ${SHELL_TIMEOUT_MS / 1000}s]`);
+  else if (result.error) parts.push(`[error] ${result.error.message}`);
+  else if (result.status !== 0) parts.push(`[exit code ${result.status ?? result.signal}]`);
+
+  return truncate(parts.join("\n") || "(no output)");
+}
+
 export function runTool(name, args) {
   if (name === "shell") {
-    return execSync(args.cmd, { encoding: "utf8", stdio: "pipe" });
+    return runShell(args.cmd);
   }
 
   if (name === "read_file") {
@@ -119,10 +144,9 @@ export function runTool(name, args) {
   }
 
   if (name === "write_file") {
-    rejectRootLevelWrite(args.path);
     const path = safeProjectPath(args.path);
-    const dir = dirname(path);
-    mkdirSync(dir, { recursive: true });
+    rejectRootLevelWrite(path);
+    mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, args.content);
     return "ok";
   }
@@ -155,11 +179,11 @@ export async function agentTurn({ task, openai, messages, confirmTool, log = con
     }
 
     for (const call of message.tool_calls) {
-      const args = JSON.parse(call.function.arguments || "{}");
-      log(`\n[tool] ${call.function.name} ${JSON.stringify(args)}`);
-
       let result;
       try {
+        const args = JSON.parse(call.function.arguments || "{}");
+        log(`\n[tool] ${call.function.name} ${JSON.stringify(args)}`);
+
         if (await confirmTool(call.function.name, args)) {
           result = runTool(call.function.name, args);
         } else {

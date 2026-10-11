@@ -27,16 +27,26 @@ async function confirmTool(name, args) {
 }
 
 async function runTask(task) {
+  let streamed = false;
+
   try {
-    return await agentTurn({
+    const reply = await agentTurn({
       task,
       openai,
       messages,
       confirmTool,
       log: (message) => console.log(chalk.dim(message)),
+      onToken: (token) => {
+        streamed = true;
+        output.write(token);
+      },
     });
+    // Replies arrive through onToken, so only print here if nothing was streamed.
+    if (streamed) output.write("\n");
+    else console.log(reply);
   } catch (error) {
-    return chalk.red(`[error] ${error.message}`);
+    if (streamed) output.write("\n");
+    console.log(chalk.red(`[error] ${error.message}`));
   }
 }
 
@@ -48,7 +58,7 @@ console.log(chalk.bold.cyan("Tiny Agent TUI"));
 console.log(chalk.dim("Type a task, or /exit to quit.\n"));
 
 if (firstTask) {
-  console.log(await runTask(firstTask));
+  await runTask(firstTask);
   console.log();
 }
 
@@ -58,7 +68,7 @@ while (true) {
   if (["/exit", "/quit"].includes(task.trim())) break;
 
   console.log();
-  console.log(await runTask(task));
+  await runTask(task);
   console.log();
 }
 

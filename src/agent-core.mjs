@@ -161,17 +161,45 @@ export function runTool(name, args) {
   return `Unknown tool: ${name}`;
 }
 
-export async function agentTurn({ task, openai, messages, confirmTool, log = console.log }) {
+async function collectStream(stream, onToken) {
+  let content = "";
+  const toolCalls = [];
+
+  for await (const chunk of stream) {
+    const delta = chunk.choices?.[0]?.delta;
+    if (!delta) continue;
+
+    if (delta.content) {
+      content += delta.content;
+      onToken?.(delta.content);
+    }
+
+    for (const part of delta.tool_calls ?? []) {
+      const call = (toolCalls[part.index ?? 0] ??= { id: "", type: "function", function: { name: "", arguments: "" } });
+      if (part.id) call.id = part.id;
+      if (part.function?.name) call.function.name += part.function.name;
+      if (part.function?.arguments) call.function.arguments += part.function.arguments;
+    }
+  }
+
+  const message = { role: "assistant", content: content || null };
+  const calls = toolCalls.filter(Boolean);
+  if (calls.length) message.tool_calls = calls;
+  return message;
+}
+
+export async function agentTurn({ task, openai, messages, confirmTool, log = console.log, onToken }) {
   messages.push({ role: "user", content: task });
 
   for (let i = 0; i < 10; i++) {
-    const response = await openai.chat.completions.create({
+    const stream = await openai.chat.completions.create({
       model: process.env.MODEL || "openai/gpt-4o-mini",
       messages,
       tools,
+      stream: true,
     });
 
-    const message = response.choices[0].message;
+    const message = await collectStream(stream, onToken);
     messages.push(message);
 
     if (!message.tool_calls) {
@@ -201,5 +229,7 @@ export async function agentTurn({ task, openai, messages, confirmTool, log = con
     }
   }
 
-  return "Stopped after 10 tool rounds.";
+  const stopped = "Stopped after 10 tool rounds.";
+  onToken?.(stopped);
+  return stopped;
 }

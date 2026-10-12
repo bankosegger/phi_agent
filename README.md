@@ -30,6 +30,21 @@ Start with a task, then continue chatting:
 npm run agent -- "create hello.js and run it"
 ```
 
+## Tools
+
+| Tool | Purpose | Asks for confirmation |
+| --- | --- | --- |
+| `read_file` | Read a file, optionally a line range | no |
+| `list_dir` | List a directory, optionally recursively | no |
+| `grep` | Regex search across project files | no |
+| `edit_file` | Replace one unique string in a file | yes |
+| `write_file` | Write a file in a project subfolder | yes |
+| `append_file` | Append to a file in a project subfolder | yes |
+| `write_asset` | Store a generated file under `.agent/assets/` | yes |
+| `shell` | Run a shell command | yes |
+
+`list_dir` and `grep` skip `node_modules`, `.git` and `.agent`.
+
 ## Safety
 
 File tools are limited to relative paths inside the project. Absolute paths and `..` traversal are blocked.

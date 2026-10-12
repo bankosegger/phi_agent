@@ -10,7 +10,11 @@ describe("needsConfirmation", () => {
     expect(needsConfirmation("shell")).toBe(true);
     expect(needsConfirmation("write_file")).toBe(true);
     expect(needsConfirmation("write_asset")).toBe(true);
+    expect(needsConfirmation("edit_file")).toBe(true);
+    expect(needsConfirmation("append_file")).toBe(true);
     expect(needsConfirmation("read_file")).toBe(false);
+    expect(needsConfirmation("list_dir")).toBe(false);
+    expect(needsConfirmation("grep")).toBe(false);
   });
 });
 
@@ -30,6 +34,64 @@ describe("runTool", () => {
       chdir(dir);
       expect(runTool("write_file", { path: "nested/hello.txt", content: "hello" })).toBe("ok");
       expect(runTool("read_file", { path: "nested/hello.txt" })).toBe("hello");
+    } finally {
+      chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a line range, lists directories, and greps", () => {
+    const originalCwd = cwd();
+    const dir = mkdtempSync(join(tmpdir(), "tiny-agent-"));
+
+    try {
+      chdir(dir);
+      runTool("write_file", { path: "src/a.txt", content: "one\ntwo\nthree\n" });
+      runTool("write_file", { path: "node_modules/skip.txt", content: "two" });
+
+      expect(runTool("read_file", { path: "src/a.txt", start_line: 2, end_line: 3 })).toBe("two\nthree");
+      expect(() => runTool("read_file", { path: "src/a.txt", start_line: 50 })).toThrow("outside the file");
+
+      expect(runTool("list_dir", {})).toBe("src/");
+      expect(runTool("list_dir", { path: "src" })).toBe("a.txt");
+      expect(runTool("list_dir", { recursive: true })).toBe("src/\nsrc/a.txt");
+
+      expect(runTool("grep", { pattern: "^t" })).toBe("src/a.txt:2:two\nsrc/a.txt:3:three");
+      expect(runTool("grep", { pattern: "nothing", path: "src" })).toBe("no matches");
+    } finally {
+      chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("edits a unique string and rejects missing or ambiguous matches", () => {
+    const originalCwd = cwd();
+    const dir = mkdtempSync(join(tmpdir(), "tiny-agent-"));
+
+    try {
+      chdir(dir);
+      runTool("write_file", { path: "src/a.txt", content: "cat dog dog" });
+
+      expect(runTool("edit_file", { path: "src/a.txt", old_string: "cat", new_string: "$& bird" })).toBe("ok");
+      expect(runTool("read_file", { path: "src/a.txt" })).toBe("$& bird dog dog");
+      expect(() => runTool("edit_file", { path: "src/a.txt", old_string: "dog", new_string: "x" })).toThrow("2 times");
+      expect(() => runTool("edit_file", { path: "src/a.txt", old_string: "fish", new_string: "x" })).toThrow("not found");
+      expect(() => runTool("edit_file", { path: "a.txt", old_string: "x", new_string: "y" })).toThrow("Root-level");
+    } finally {
+      chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("appends to files, creating them if needed", () => {
+    const originalCwd = cwd();
+    const dir = mkdtempSync(join(tmpdir(), "tiny-agent-"));
+
+    try {
+      chdir(dir);
+      runTool("append_file", { path: "logs/out.txt", content: "a" });
+      runTool("append_file", { path: "logs/out.txt", content: "b" });
+      expect(runTool("read_file", { path: "logs/out.txt" })).toBe("ab");
     } finally {
       chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });

@@ -1,10 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { appendFileSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 const ASSET_DIR = ".agent/assets";
 const SHELL_TIMEOUT_MS = 30_000;
 const MAX_TOOL_OUTPUT = 10_000;
+const MAX_LIST_ENTRIES = 500;
+const MAX_GREP_MATCHES = 100;
+const MAX_GREP_FILE_BYTES = 1024 * 1024;
+const SKIPPED_DIRS = new Set(["node_modules", ".git", ".agent"]);
 
 export const tools = [
   {
@@ -23,11 +27,76 @@ export const tools = [
     type: "function",
     function: {
       name: "read_file",
-      description: "Read a text file inside the project.",
+      description: "Read a text file inside the project. Optionally read only a 1-indexed, inclusive line range.",
       parameters: {
         type: "object",
-        properties: { path: { type: "string" } },
+        properties: {
+          path: { type: "string" },
+          start_line: { type: "integer" },
+          end_line: { type: "integer" },
+        },
         required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_dir",
+      description: "List files and folders in a project directory. Folders end with /. Skips node_modules, .git and .agent.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Directory to list. Defaults to the project root." },
+          recursive: { type: "boolean" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "grep",
+      description: "Search project files for a regular expression. Returns path:line:text matches.",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "JavaScript regular expression" },
+          path: { type: "string", description: "File or directory to search. Defaults to the project root." },
+        },
+        required: ["pattern"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "edit_file",
+      description:
+        "Replace one exact occurrence of old_string with new_string in a file. Fails if old_string is missing or appears more than once, so include enough context to make it unique.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          old_string: { type: "string" },
+          new_string: { type: "string" },
+        },
+        required: ["path", "old_string", "new_string"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "append_file",
+      description: "Append text to a file inside a project subfolder, creating it if needed.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["path", "content"],
       },
     },
   },
@@ -74,7 +143,7 @@ export function createMessages() {
 }
 
 export function needsConfirmation(name) {
-  return ["shell", "write_file", "write_asset"].includes(name);
+  return ["shell", "write_file", "write_asset", "edit_file", "append_file"].includes(name);
 }
 
 export function safeProjectPath(path) {
@@ -134,13 +203,111 @@ function runShell(cmd) {
   return truncate(parts.join("\n") || "(no output)");
 }
 
+function readLines(text, start, end) {
+  const lines = text.split("\n");
+  const from = Math.max(1, start ?? 1);
+  const to = Math.min(lines.length, end ?? lines.length);
+  if (from > to) throw new Error(`Line range ${from}-${to} is outside the file (${lines.length} lines)`);
+  return lines.slice(from - 1, to).join("\n");
+}
+
+function walk(dir, visit) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory() && SKIPPED_DIRS.has(entry.name)) continue;
+    const fullPath = join(dir, entry.name);
+    if (visit(fullPath, entry.isDirectory()) === false) return false;
+    if (entry.isDirectory() && walk(fullPath, visit) === false) return false;
+  }
+}
+
+function listDir(path = ".", recursive = false) {
+  const root = safeProjectPath(path);
+  const entries = [];
+
+  if (recursive) {
+    walk(root, (fullPath, isDir) => {
+      if (entries.length >= MAX_LIST_ENTRIES) return false;
+      entries.push(relative(root, fullPath).replaceAll("\\", "/") + (isDir ? "/" : ""));
+    });
+  } else {
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (entry.isDirectory() && SKIPPED_DIRS.has(entry.name)) continue;
+      entries.push(entry.name + (entry.isDirectory() ? "/" : ""));
+    }
+  }
+
+  const suffix = entries.length >= MAX_LIST_ENTRIES ? `\n[stopped at ${MAX_LIST_ENTRIES} entries]` : "";
+  return (entries.sort().join("\n") || "(empty)") + suffix;
+}
+
+function grep(pattern, path = ".") {
+  const regex = new RegExp(pattern);
+  const root = safeProjectPath(path);
+  const matches = [];
+
+  const searchFile = (fullPath) => {
+    if (statSync(fullPath).size > MAX_GREP_FILE_BYTES) return;
+    const text = readFileSync(fullPath, "utf8");
+    if (text.includes("\0")) return;
+
+    const shown = relative(process.cwd(), fullPath).replaceAll("\\", "/");
+    for (const [i, line] of text.split("\n").entries()) {
+      if (!regex.test(line)) continue;
+      matches.push(`${shown}:${i + 1}:${line.trimEnd().slice(0, 300)}`);
+      if (matches.length >= MAX_GREP_MATCHES) return false;
+    }
+  };
+
+  if (statSync(root).isDirectory()) {
+    walk(root, (fullPath, isDir) => (isDir ? undefined : searchFile(fullPath)));
+  } else {
+    searchFile(root);
+  }
+
+  const suffix = matches.length >= MAX_GREP_MATCHES ? `\n[stopped at ${MAX_GREP_MATCHES} matches]` : "";
+  return (matches.join("\n") || "no matches") + suffix;
+}
+
 export function runTool(name, args) {
   if (name === "shell") {
     return runShell(args.cmd);
   }
 
   if (name === "read_file") {
-    return readFileSync(safeProjectPath(args.path), "utf8");
+    const text = readFileSync(safeProjectPath(args.path), "utf8");
+    const hasRange = args.start_line != null || args.end_line != null;
+    return truncate(hasRange ? readLines(text, args.start_line, args.end_line) : text);
+  }
+
+  if (name === "list_dir") {
+    return listDir(args.path, args.recursive);
+  }
+
+  if (name === "grep") {
+    return grep(args.pattern, args.path);
+  }
+
+  if (name === "edit_file") {
+    const path = safeProjectPath(args.path);
+    rejectRootLevelWrite(path);
+    if (!args.old_string) throw new Error("old_string must not be empty");
+
+    const text = readFileSync(path, "utf8");
+    const count = text.split(args.old_string).length - 1;
+    if (count === 0) throw new Error("old_string not found");
+    if (count > 1) throw new Error(`old_string appears ${count} times; add more context to make it unique`);
+
+    // A replacer function avoids special "$" patterns in new_string.
+    writeFileSync(path, text.replace(args.old_string, () => args.new_string));
+    return "ok";
+  }
+
+  if (name === "append_file") {
+    const path = safeProjectPath(args.path);
+    rejectRootLevelWrite(path);
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, args.content);
+    return "ok";
   }
 
   if (name === "write_file") {

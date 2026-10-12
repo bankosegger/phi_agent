@@ -4,7 +4,8 @@ import chalk from "chalk";
 import { rmSync } from "node:fs";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { agentTurn, createMessages, needsConfirmation } from "./src/agent-core.mjs";
+import { agentTurn, createMessages } from "./src/agent-core.mjs";
+import { needsConfirmation } from "./src/tools.mjs";
 
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",

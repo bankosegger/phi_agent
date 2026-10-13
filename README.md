@@ -37,6 +37,7 @@ npm run agent -- "create hello.js and run it"
 | `read_file` | Read a file, optionally a line range | no |
 | `list_dir` | List a directory, optionally recursively | no |
 | `grep` | Regex search across project files | no |
+| `git` | Read-only `status`, `diff` (optionally `--staged`), or `log` | no |
 | `edit_file` | Replace one unique string in a file | yes |
 | `write_file` | Write a file in a project subfolder | yes |
 | `append_file` | Append to a file in a project subfolder | yes |

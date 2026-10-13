@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,7 @@ describe("needsConfirmation", () => {
     expect(needsConfirmation("read_file")).toBe(false);
     expect(needsConfirmation("list_dir")).toBe(false);
     expect(needsConfirmation("grep")).toBe(false);
+    expect(needsConfirmation("git")).toBe(false);
   });
 });
 
@@ -114,6 +116,35 @@ describe("runTool", () => {
   it("truncates long shell output", () => {
     const result = runTool("shell", { cmd: "head -c 20000 /dev/zero | tr '\\0' a" });
     expect(result).toContain("[truncated 10000 chars]");
+  });
+
+  it("runs read-only git status, diff and log", () => {
+    const originalCwd = cwd();
+    const dir = mkdtempSync(join(tmpdir(), "tiny-agent-"));
+    const git = (...args) => spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+
+    try {
+      chdir(dir);
+      git("init", "-q");
+      runTool("write_file", { path: "src/a.txt", content: "one\n" });
+      git("add", "src/a.txt");
+      git("-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "first");
+      runTool("write_file", { path: "src/a.txt", content: "one\ntwo\n" });
+      runTool("write_file", { path: "src/b.txt", content: "new\n" });
+
+      expect(runTool("git", { command: "status" })).toContain("?? src/b.txt");
+      expect(runTool("git", { command: "diff" })).toContain("+two");
+      expect(runTool("git", { command: "diff", path: "src/b.txt" })).toBe("(no output)");
+      expect(runTool("git", { command: "diff", staged: true })).toBe("(no output)");
+      expect(runTool("git", { command: "log" })).toContain("first");
+      expect(runTool("git", { command: "log", count: 1 })).toMatch(/^[0-9a-f]+ first\n$/);
+
+      expect(() => runTool("git", { command: "push" })).toThrow("must be one of");
+      expect(() => runTool("git", { command: "status", path: "../outside" })).toThrow("inside the project");
+    } finally {
+      chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("stores assets under .agent/assets", () => {

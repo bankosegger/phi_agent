@@ -9,6 +9,9 @@ const MAX_LIST_ENTRIES = 500;
 const MAX_GREP_MATCHES = 100;
 const MAX_GREP_FILE_BYTES = 1024 * 1024;
 const SKIPPED_DIRS = new Set(["node_modules", ".git", ".agent"]);
+const GIT_COMMANDS = ["status", "diff", "log"];
+const GIT_LOG_DEFAULT = 20;
+const GIT_LOG_MAX = 100;
 
 export const tools = [
   {
@@ -20,6 +23,24 @@ export const tools = [
         type: "object",
         properties: { cmd: { type: "string" } },
         required: ["cmd"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git",
+      description:
+        "Run a read-only git command in the project: status, diff, or log. Optionally limit to a project path. Does not change the repository.",
+      parameters: {
+        type: "object",
+        properties: {
+          command: { type: "string", enum: GIT_COMMANDS },
+          path: { type: "string", description: "File or folder to limit the output to. Defaults to the whole project." },
+          staged: { type: "boolean", description: "For diff: show staged changes instead of unstaged." },
+          count: { type: "integer", description: `For log: number of commits, 1-${GIT_LOG_MAX}. Defaults to ${GIT_LOG_DEFAULT}.` },
+        },
+        required: ["command"],
       },
     },
   },
@@ -176,13 +197,44 @@ function truncate(text) {
 }
 
 function runShell(cmd) {
-  const result = spawnSync(cmd, {
-    shell: true,
-    encoding: "utf8",
-    timeout: SHELL_TIMEOUT_MS,
-    maxBuffer: 10 * 1024 * 1024,
-  });
+  return formatResult(
+    spawnSync(cmd, {
+      shell: true,
+      encoding: "utf8",
+      timeout: SHELL_TIMEOUT_MS,
+      maxBuffer: 10 * 1024 * 1024,
+    }),
+  );
+}
 
+function runGit({ command, path, staged, count }) {
+  if (!GIT_COMMANDS.includes(command)) {
+    throw new Error(`git command must be one of: ${GIT_COMMANDS.join(", ")}`);
+  }
+
+  const argv = [command];
+  if (command === "status") argv.push("--short", "--branch");
+  if (command === "diff") argv.push("--no-ext-diff", "--no-textconv", ...(staged ? ["--staged"] : []));
+  if (command === "log") {
+    const max = Math.min(Math.max(1, Number(count) || GIT_LOG_DEFAULT), GIT_LOG_MAX);
+    argv.push("--oneline", `--max-count=${max}`);
+  }
+
+  // Paths go after "--" so git never reads them as options.
+  const rel = path ? relative(process.cwd(), safeProjectPath(path)).replaceAll("\\", "/") : "";
+  argv.push("--", rel || ".");
+
+  // No shell: arguments are passed to git as-is. --no-pager stops git waiting on a pager.
+  return formatResult(
+    spawnSync("git", ["--no-pager", ...argv], {
+      encoding: "utf8",
+      timeout: SHELL_TIMEOUT_MS,
+      maxBuffer: 10 * 1024 * 1024,
+    }),
+  );
+}
+
+function formatResult(result) {
   const parts = [];
   if (result.stdout) parts.push(result.stdout);
   if (result.stderr) parts.push(`[stderr]\n${result.stderr}`);
@@ -261,6 +313,10 @@ function grep(pattern, path = ".") {
 export function runTool(name, args) {
   if (name === "shell") {
     return runShell(args.cmd);
+  }
+
+  if (name === "git") {
+    return runGit(args);
   }
 
   if (name === "read_file") {

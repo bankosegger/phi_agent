@@ -107,14 +107,15 @@ describe("runTool", () => {
   });
 
   it("returns shell output, stderr and exit code instead of throwing", () => {
-    const result = runTool("shell", { cmd: "echo out; echo err >&2; exit 3" });
+    // node -e behaves the same under cmd.exe (Windows) and /bin/sh.
+    const result = runTool("shell", { cmd: `node -e "console.log('out'); console.error('err'); process.exit(3)"` });
     expect(result).toContain("out");
     expect(result).toContain("[stderr]\nerr");
     expect(result).toContain("[exit code 3]");
   });
 
   it("truncates long shell output", () => {
-    const result = runTool("shell", { cmd: "head -c 20000 /dev/zero | tr '\\0' a" });
+    const result = runTool("shell", { cmd: `node -e "process.stdout.write('a'.repeat(20000))"` });
     expect(result).toContain("[truncated 10000 chars]");
   });
 

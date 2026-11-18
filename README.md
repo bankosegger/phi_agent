@@ -30,6 +30,18 @@ Start with a task, then continue chatting:
 npm run agent -- "create hello.js and run it"
 ```
 
+## Commands
+
+| Input | Effect |
+| --- | --- |
+| `/help` | Show the commands |
+| `/clear` | Start a new conversation |
+| `/exit`, `/quit` | Quit |
+| Ctrl+C while the agent works | Cancel the current task and return to the prompt |
+| Ctrl+C or Ctrl+D at the prompt | Quit |
+
+A cancelled task keeps the conversation usable: any tool calls it had started are recorded as cancelled, and you can carry on with a new task.
+
 ## Tools
 
 | Tool | Purpose | Asks for confirmation |

@@ -1,10 +1,11 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 const ASSET_DIR = ".agent/assets";
 const SHELL_TIMEOUT_MS = 30_000;
 const MAX_TOOL_OUTPUT = 10_000;
+const MAX_SHELL_CAPTURE = 10 * 1024 * 1024;
 const MAX_LIST_ENTRIES = 500;
 const MAX_GREP_MATCHES = 100;
 const MAX_GREP_FILE_BYTES = 1024 * 1024;
@@ -196,15 +197,68 @@ function truncate(text) {
   return `${text.slice(0, MAX_TOOL_OUTPUT)}\n[truncated ${text.length - MAX_TOOL_OUTPUT} chars]`;
 }
 
-function runShell(cmd) {
-  return formatResult(
-    spawnSync(cmd, {
+// Kills the command and anything it started; the shell alone may leave children running.
+function killProcessTree(child) {
+  try {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+    } else {
+      process.kill(-child.pid, "SIGKILL");
+    }
+  } catch {
+    // Already exited.
+  }
+}
+
+function runShell(cmd, signal) {
+  if (signal?.aborted) return formatResult({ stopped: "cancelled" });
+
+  return new Promise((resolvePromise) => {
+    // stdin is closed so commands that wait for input fail fast instead of hanging.
+    // On POSIX the command gets its own process group so the whole group can be killed.
+    // (On Windows, detached would open a new console window; taskkill /T covers the tree.)
+    const child = spawn(cmd, {
       shell: true,
-      encoding: "utf8",
-      timeout: SHELL_TIMEOUT_MS,
-      maxBuffer: 10 * 1024 * 1024,
-    }),
-  );
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      detached: process.platform !== "win32",
+    });
+    const output = { stdout: "", stderr: "" };
+    let stopped = null;
+    let settled = false;
+
+    for (const name of ["stdout", "stderr"]) {
+      child[name].setEncoding("utf8").on("data", (text) => {
+        if (output[name].length < MAX_SHELL_CAPTURE) output[name] += text;
+      });
+    }
+
+    const stop = (reason) => {
+      if (stopped) return;
+      stopped = reason;
+      killProcessTree(child);
+      // A process that escaped the kill can hold the output pipes open; stop waiting for it.
+      setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish({ status: child.exitCode, signal: child.signalCode });
+      }, 2000).unref();
+    };
+    const onAbort = () => stop("cancelled");
+    const timer = setTimeout(() => stop("timeout"), SHELL_TIMEOUT_MS);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolvePromise(formatResult({ ...output, ...result, stopped }));
+    };
+    child.on("error", (error) => finish({ error }));
+    child.on("close", (status, exitSignal) => finish({ status, signal: exitSignal }));
+  });
 }
 
 function runGit({ command, path, staged, count }) {
@@ -238,7 +292,10 @@ function formatResult(result) {
   const parts = [];
   if (result.stdout) parts.push(result.stdout);
   if (result.stderr) parts.push(`[stderr]\n${result.stderr}`);
-  if (result.error?.code === "ETIMEDOUT") parts.push(`[timed out after ${SHELL_TIMEOUT_MS / 1000}s]`);
+  if (result.stopped === "cancelled") parts.push("[cancelled by user]");
+  else if (result.stopped === "timeout" || result.error?.code === "ETIMEDOUT") {
+    parts.push(`[timed out after ${SHELL_TIMEOUT_MS / 1000}s]`);
+  }
   else if (result.error) parts.push(`[error] ${result.error.message}`);
   else if (result.status !== 0) parts.push(`[exit code ${result.status ?? result.signal}]`);
 
@@ -310,9 +367,10 @@ function grep(pattern, path = ".") {
   return (matches.join("\n") || "no matches") + suffix;
 }
 
-export function runTool(name, args) {
+// Runs a tool and resolves to its text result. Aborting `signal` stops a running shell command.
+export async function runTool(name, args, { signal } = {}) {
   if (name === "shell") {
-    return runShell(args.cmd);
+    return runShell(args.cmd, signal);
   }
 
   if (name === "git") {

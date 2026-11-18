@@ -54,7 +54,7 @@ describe("agentTurn", () => {
         openai,
         messages: createMessages(),
         confirmTool: async () => true,
-        log: () => {},
+        onToolCall: () => {},
         onToken: (token) => tokens.push(token),
       }),
     ).resolves.toBe("done");
@@ -72,7 +72,7 @@ describe("agentTurn", () => {
     const messages = createMessages();
 
     await expect(
-      agentTurn({ task: "test", openai, messages, confirmTool: async () => true, log: () => {} }),
+      agentTurn({ task: "test", openai, messages, confirmTool: async () => true, onToolCall: () => {} }),
     ).resolves.toBe("ok");
 
     const assistant = messages.find((m) => m.tool_calls);
@@ -88,7 +88,7 @@ describe("agentTurn", () => {
     const messages = createMessages();
 
     await expect(
-      agentTurn({ task: "test", openai, messages, confirmTool: async () => true, log: () => {} }),
+      agentTurn({ task: "test", openai, messages, confirmTool: async () => true, onToolCall: () => {} }),
     ).resolves.toBe("recovered");
     expect(messages.find((m) => m.role === "tool").content).toMatch(/^error: /);
   });
@@ -106,7 +106,7 @@ describe("agentTurn cancellation", () => {
         openai,
         messages,
         confirmTool: async () => true,
-        log: () => {},
+        onToolCall: () => {},
         onToken: () => controller.abort(),
         signal: controller.signal,
       }),
@@ -130,7 +130,7 @@ describe("agentTurn cancellation", () => {
     };
 
     await expect(
-      agentTurn({ task: "test", openai, messages, confirmTool, log: () => {}, signal: controller.signal }),
+      agentTurn({ task: "test", openai, messages, confirmTool, onToolCall: () => {}, signal: controller.signal }),
     ).rejects.toThrow(/abort/i);
 
     // The conversation stays valid for the next request: each tool call has a result.
@@ -147,8 +147,31 @@ describe("agentTurn cancellation", () => {
     const openai = fakeOpenai([[{ content: "never" }]]);
 
     await expect(
-      agentTurn({ task: "test", openai, messages: createMessages(), confirmTool: async () => true, log: () => {}, signal: controller.signal }),
+      agentTurn({ task: "test", openai, messages: createMessages(), confirmTool: async () => true, onToolCall: () => {}, signal: controller.signal }),
     ).rejects.toThrow(/abort/i);
     expect(openai.requests).toBe(0);
+  });
+});
+
+describe("agentTurn round limit", () => {
+  it("stops after maxRounds model requests with every tool call answered", async () => {
+    const toolCall = (id) => [{ tool_calls: [{ index: 0, id, function: { name: "list_dir", arguments: "{}" } }] }];
+    const openai = fakeOpenai([toolCall("1"), toolCall("2"), [{ content: "never requested" }]]);
+    const messages = createMessages();
+    const seen = [];
+
+    const reply = await agentTurn({
+      task: "test",
+      openai,
+      messages,
+      confirmTool: async () => true,
+      onToolCall: (name, args) => seen.push([name, args]),
+      maxRounds: 2,
+    });
+
+    expect(reply).toMatch(/^Stopped after 2 tool rounds/);
+    expect(openai.requests).toBe(2);
+    expect(seen).toEqual([["list_dir", {}], ["list_dir", {}]]);
+    expect(messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "2" });
   });
 });

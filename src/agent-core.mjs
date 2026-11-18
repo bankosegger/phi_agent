@@ -1,6 +1,6 @@
 import { runTool, tools } from "./tools.mjs";
 
-const MAX_TOOL_ROUNDS = 10;
+const DEFAULT_MAX_TOOL_ROUNDS = 25;
 export const CANCELLED = "cancelled by user";
 
 export function systemPrompt({ cwd = process.cwd(), platform = process.platform, date = new Date() } = {}) {
@@ -48,18 +48,22 @@ async function collectStream(stream, onToken) {
   return message;
 }
 
-async function callTool(call, { confirmTool, log, signal }) {
+function logToolCall(name, args) {
+  console.log(`\n[tool] ${name} ${JSON.stringify(args)}`);
+}
+
+async function callTool(call, { confirmTool, onToolCall, signal }) {
   if (signal?.aborted) return CANCELLED;
 
   try {
     const args = JSON.parse(call.function.arguments || "{}");
-    log(`\n[tool] ${call.function.name} ${JSON.stringify(args)}`);
+    onToolCall(call.function.name, args);
 
     const approved = await confirmTool(call.function.name, args, signal);
     // The task may have been cancelled while the user was being asked.
     if (signal?.aborted) return CANCELLED;
     if (!approved) return "skipped by user";
-    return String(runTool(call.function.name, args));
+    return String(await runTool(call.function.name, args, { signal }));
   } catch (error) {
     // An abort while confirming rejects the prompt; report it as a cancel, not a tool error.
     return signal?.aborted ? CANCELLED : `error: ${error.message}`;
@@ -67,14 +71,25 @@ async function callTool(call, { confirmTool, log, signal }) {
 }
 
 /**
- * Runs one user task until the model replies without tool calls.
+ * Runs one user task until the model replies without tool calls, or for at most `maxRounds`
+ * model requests (MAX_TOOL_ROUNDS in the environment, default 25).
+ * `onToolCall(name, args)` is told about each tool call before it is confirmed and run.
  * Aborting `signal` stops the turn and rejects with the signal's reason. Every tool call
  * already in `messages` still gets a result, so the conversation can continue afterwards.
  */
-export async function agentTurn({ task, openai, messages, confirmTool, log = console.log, onToken, signal }) {
+export async function agentTurn({
+  task,
+  openai,
+  messages,
+  confirmTool,
+  onToolCall = logToolCall,
+  onToken,
+  signal,
+  maxRounds = Number(process.env.MAX_TOOL_ROUNDS) || DEFAULT_MAX_TOOL_ROUNDS,
+}) {
   messages.push({ role: "user", content: task });
 
-  for (let i = 0; i < MAX_TOOL_ROUNDS; i++) {
+  for (let i = 0; i < maxRounds; i++) {
     signal?.throwIfAborted();
 
     const stream = await openai.chat.completions.create(
@@ -92,12 +107,12 @@ export async function agentTurn({ task, openai, messages, confirmTool, log = con
     }
 
     for (const call of message.tool_calls) {
-      messages.push({ role: "tool", tool_call_id: call.id, content: await callTool(call, { confirmTool, log, signal }) });
+      messages.push({ role: "tool", tool_call_id: call.id, content: await callTool(call, { confirmTool, onToolCall, signal }) });
     }
   }
 
   signal?.throwIfAborted();
-  const stopped = `Stopped after ${MAX_TOOL_ROUNDS} tool rounds.`;
+  const stopped = `Stopped after ${maxRounds} tool rounds. Say "continue" to keep going.`;
   onToken?.(stopped);
   return stopped;
 }

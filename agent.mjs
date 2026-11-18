@@ -5,6 +5,7 @@ import { rmSync } from "node:fs";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { agentTurn, createMessages } from "./src/agent-core.mjs";
+import { previewToolCall } from "./src/preview.mjs";
 import { needsConfirmation } from "./src/tools.mjs";
 
 const HELP = `Commands:
@@ -49,6 +50,18 @@ function clearAssets() {
   rmSync(".agent/assets", { recursive: true, force: true });
 }
 
+const PREVIEW_STYLES = {
+  add: (text) => chalk.green(`  + ${text}`),
+  remove: (text) => chalk.red(`  - ${text}`),
+  note: (text) => chalk.dim(`    ${text}`),
+};
+
+function showToolCall(name, args) {
+  const { summary, lines } = previewToolCall(name, args);
+  console.log(chalk.dim(`\n[tool] ${name} ${summary}`));
+  for (const { kind, text } of lines) console.log(PREVIEW_STYLES[kind](text));
+}
+
 async function confirmTool(name, args, signal) {
   if (!needsConfirmation(name)) return true;
 
@@ -69,7 +82,7 @@ async function runTask(task) {
       messages,
       confirmTool,
       signal: controller.signal,
-      log: (message) => console.log(chalk.dim(message)),
+      onToolCall: showToolCall,
       onToken: (token) => {
         streamed = true;
         output.write(token);

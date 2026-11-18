@@ -14,6 +14,8 @@ Add your OpenRouter key to `.env`:
 ```env
 OPENROUTER_API_KEY=your_key_here
 MODEL=openai/gpt-4o-mini
+# Optional: model requests per task before the agent stops (default 25)
+# MAX_TOOL_ROUNDS=25
 ```
 
 ## Run
@@ -40,7 +42,9 @@ npm run agent -- "create hello.js and run it"
 | Ctrl+C while the agent works | Cancel the current task and return to the prompt |
 | Ctrl+C or Ctrl+D at the prompt | Quit |
 
-A cancelled task keeps the conversation usable: any tool calls it had started are recorded as cancelled, and you can carry on with a new task.
+A cancelled task keeps the conversation usable: any tool calls it had started are recorded as cancelled, and you can carry on with a new task. Cancelling also stops a running `shell` command and any processes it started.
+
+Before a tool that changes files runs, the agent shows what it will do: `edit_file` shows the removed and added lines, and `write_file` says whether it creates a new file or overwrites an existing one.
 
 ## Tools
 

@@ -1,0 +1,7 @@
+# Only the agent's code goes into the sandbox image: never .env, which holds the API key.
+*
+!agent.mjs
+!package.json
+!package-lock.json
+!src
+src/**/*.test.mjs

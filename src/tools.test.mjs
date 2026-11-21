@@ -1,10 +1,55 @@
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { chdir, cwd } from "node:process";
-import { needsConfirmation, runTool, safeProjectPath } from "./tools.mjs";
+import { checkToolCall, commandEnv, globToRegExp, needsConfirmation, runTool, safeProjectPath, shellTimeout } from "./tools.mjs";
+
+async function inTempDir(fn) {
+  const originalCwd = cwd();
+  const dir = mkdtempSync(join(tmpdir(), "tiny-agent-"));
+  try {
+    chdir(dir);
+    return await fn(dir);
+  } finally {
+    chdir(originalCwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function writeFiles(files) {
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, content);
+  }
+}
+
+function git(...args) {
+  const result = spawnSync("git", args, { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+}
+
+// A git project with built files, logs and dependencies that searches should leave out.
+const PROJECT = {
+  ".gitignore": "dist/\n*.log\n",
+  "README.md": "# Demo\n",
+  "debug.log": "export log\n",
+  "dist/out.js": "export const built = 1;\n",
+  "logs/app.log": "export failed\n",
+  "node_modules/dep/index.js": "export const dep = 1;\n",
+  "src/a.js": "export const a = 1;\n",
+  "src/b.test.js": "import { a } from './a.js';\n",
+  "src/lib/c.js": "export const c = 3;\n",
+};
+
+async function inGitProject(fn) {
+  await inTempDir(async (dir) => {
+    git("init", "-q");
+    writeFiles(PROJECT);
+    await fn(dir);
+  });
+}
 
 describe("needsConfirmation", () => {
   it("requires confirmation for risky tools", () => {
@@ -24,6 +69,30 @@ describe("safeProjectPath", () => {
   it("blocks absolute paths and parent traversal", () => {
     expect(() => safeProjectPath("/tmp/nope.txt")).toThrow("relative");
     expect(() => safeProjectPath("../nope.txt")).toThrow("inside the project");
+  });
+});
+
+describe("checkToolCall", () => {
+  it("throws for calls that would fail, without changing anything", async () => {
+    await inTempDir(async () => {
+      writeFiles({ "src/a.js": "const a = 1;\n" });
+
+      expect(() => checkToolCall("edit_file", { path: "src/a.js", old_string: "b", new_string: "c" })).toThrow("old_string not found");
+      expect(() => checkToolCall("edit_file", { path: "src/x.js", old_string: "b", new_string: "c" })).toThrow("does not exist");
+      expect(() => checkToolCall("write_file", { path: "new.js", content: "x" })).toThrow("project root");
+      expect(() => checkToolCall("append_file", { path: "../out.txt", content: "x" })).toThrow("inside the project");
+      expect(() => checkToolCall("write_asset", { path: "../../x.txt", content: "x" })).toThrow("inside .agent/assets");
+      expect(() => checkToolCall("shell", { cmd: " " })).toThrow("cmd must not be empty");
+
+      checkToolCall("edit_file", { path: "src/a.js", old_string: "a = 1", new_string: "a = 2" });
+      checkToolCall("write_file", { path: "src/new/b.js", content: "x" });
+      checkToolCall("shell", { cmd: "node -e \"require('fs').writeFileSync('ran.txt', '')\"" });
+      checkToolCall("read_file", {});
+
+      expect(readFileSync("src/a.js", "utf8")).toBe("const a = 1;\n");
+      expect(existsSync("src/new")).toBe(false);
+      expect(existsSync("ran.txt")).toBe(false);
+    });
   });
 });
 
@@ -78,7 +147,9 @@ describe("runTool", () => {
       expect(await runTool("read_file", { path: "src/a.txt" })).toBe("$& bird dog dog");
       await expect(runTool("edit_file", { path: "src/a.txt", old_string: "dog", new_string: "x" })).rejects.toThrow("2 times");
       await expect(runTool("edit_file", { path: "src/a.txt", old_string: "fish", new_string: "x" })).rejects.toThrow("not found");
-      await expect(runTool("edit_file", { path: "a.txt", old_string: "x", new_string: "y" })).rejects.toThrow("Root-level");
+      await expect(runTool("edit_file", { path: "src/b.txt", old_string: "x", new_string: "y" })).rejects.toThrow(
+        "src/b.txt does not exist; create it with write_file",
+      );
     } finally {
       chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -100,9 +171,46 @@ describe("runTool", () => {
     }
   });
 
-  it("blocks root-level project writes", async () => {
-    for (const path of ["hello.txt", "./hello.txt", "src/../hello.txt"]) {
-      await expect(runTool("write_file", { path, content: "hello" })).rejects.toThrow("Root-level writes are blocked");
+  it("blocks new files at the project root, but changes existing ones", async () => {
+    await inTempDir(async () => {
+      for (const path of ["hello.txt", "./hello.txt", "src/../hello.txt"]) {
+        await expect(runTool("write_file", { path, content: "hello" })).rejects.toThrow("New files can't be created at the project root");
+        await expect(runTool("append_file", { path, content: "hello" })).rejects.toThrow("New files can't be created at the project root");
+      }
+      expect(existsSync("hello.txt")).toBe(false);
+
+      writeFiles({ "package.json": '{ "name": "demo" }\n', ".gitignore": "dist/\n" });
+      await runTool("edit_file", { path: "package.json", old_string: "demo", new_string: "app" });
+      await runTool("append_file", { path: ".gitignore", content: "*.log\n" });
+      await runTool("write_file", { path: "./package.json", content: "{}\n" });
+      expect(readFileSync("package.json", "utf8")).toBe("{}\n");
+      expect(readFileSync(".gitignore", "utf8")).toBe("dist/\n*.log\n");
+    });
+  });
+
+  it("blocks changes inside .git", async () => {
+    await inTempDir(async () => {
+      writeFiles({ ".git/config": "[core]\n", "sub/.GIT/HEAD": "ref\n" });
+      await expect(runTool("write_file", { path: ".git/hooks/pre-commit", content: "evil" })).rejects.toThrow("inside .git");
+      await expect(runTool("append_file", { path: ".git/config", content: "x" })).rejects.toThrow("inside .git");
+      await expect(runTool("edit_file", { path: "sub/.GIT/HEAD", old_string: "ref", new_string: "x" })).rejects.toThrow("inside .git");
+      expect(existsSync(".git/hooks")).toBe(false);
+      expect(readFileSync(".git/config", "utf8")).toBe("[core]\n");
+    });
+  });
+
+  it("keeps the API key out of commands' environment", async () => {
+    expect(commandEnv({ OPENROUTER_API_KEY: "a", openrouter_api_key: "b", PATH: "/bin" })).toEqual({ PATH: "/bin" });
+
+    const saved = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "sk-secret";
+    try {
+      const result = await runTool("shell", { cmd: `node -e "console.log(process.env.OPENROUTER_API_KEY || 'no key')"` });
+      expect(result).toContain("no key");
+      expect(result).not.toContain("sk-secret");
+    } finally {
+      if (saved === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = saved;
     }
   });
 
@@ -148,9 +256,13 @@ describe("runTool", () => {
     expect(await runTool("shell", { cmd: "echo hi" }, { signal: controller.signal })).toContain("[cancelled by user]");
   });
 
-  it("truncates long shell output", async () => {
-    const result = await runTool("shell", { cmd: `node -e "process.stdout.write('a'.repeat(20000))"` });
-    expect(result).toContain("[truncated 10000 chars]");
+  it("keeps the start and end of long shell output, and how the command ended", async () => {
+    const result = await runTool("shell", { cmd: `node -e "process.stdout.write('a'.repeat(20000) + 'END'); process.exit(2)"` });
+    expect(result).toMatch(/^a{3000}\n\[… 10003 chars omitted …\]\na{6997}END\n\[exit code 2\]$/);
+  });
+
+  it("stops a shell command after its timeout", async () => {
+    expect(await runTool("shell", { cmd: `node -e "setTimeout(() => {}, 30000)"`, timeout: 1 })).toBe("[timed out after 1s]");
   });
 
   it("runs read-only git status, diff and log", async () => {
@@ -182,6 +294,28 @@ describe("runTool", () => {
     }
   });
 
+  it("greps regardless of case when asked, and reads an empty path as the project root", async () => {
+    await inTempDir(async () => {
+      await runTool("write_file", { path: "src/a.txt", content: "Hello\n" });
+
+      expect(await runTool("grep", { pattern: "hello" })).toBe("no matches");
+      expect(await runTool("grep", { pattern: "hello", ignore_case: true })).toBe("src/a.txt:1:Hello");
+      expect(await runTool("grep", { pattern: "Hello", path: "" })).toBe("src/a.txt:1:Hello");
+      expect(await runTool("list_dir", { path: "" })).toBe("src/");
+    });
+  });
+
+  it("rejects missing arguments before doing anything", async () => {
+    await inTempDir(async () => {
+      await expect(runTool("shell", {})).rejects.toThrow("cmd must be a string");
+      await expect(runTool("shell", { cmd: " " })).rejects.toThrow("cmd must not be empty");
+      await expect(runTool("grep", {})).rejects.toThrow("pattern must be a string");
+      await expect(runTool("write_file", { path: "src/x.txt" })).rejects.toThrow("content must be a string");
+      await expect(runTool("edit_file", { path: "src/x.txt", old_string: "a" })).rejects.toThrow("new_string must be a string");
+      expect(existsSync("src")).toBe(false);
+    });
+  });
+
   it("stores assets under .agent/assets", async () => {
     const originalCwd = cwd();
     const dir = mkdtempSync(join(tmpdir(), "tiny-agent-"));
@@ -192,9 +326,164 @@ describe("runTool", () => {
         "saved to .agent/assets/notes/output.txt",
       );
       expect(existsSync(join(dir, ".agent", "assets", "notes", "output.txt"))).toBe(true);
+      expect(readFileSync(join(dir, ".agent", ".gitignore"), "utf8")).toBe("*\n");
     } finally {
       chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("searching a git project", () => {
+  it("lists what git doesn't ignore, and names what it does", async () => {
+    await inGitProject(async () => {
+      const ignored = "[ignored by git, not listed: debug.log, dist/, logs/]";
+      expect(await runTool("list_dir", {})).toBe(`.gitignore\nREADME.md\nsrc/\n${ignored}`);
+      expect(await runTool("list_dir", { recursive: true })).toBe(
+        `.gitignore\nREADME.md\nsrc/\nsrc/a.js\nsrc/b.test.js\nsrc/lib/\nsrc/lib/c.js\n${ignored}`,
+      );
+      expect(await runTool("list_dir", { path: "src/lib" })).toBe("c.js");
+      // A folder git ignores is listed when asked for by name, whether git ignores it by its
+      // name (dist/) or for its contents (logs/ holds only *.log files).
+      expect(await runTool("list_dir", { path: "dist" })).toBe("out.js");
+      expect(await runTool("list_dir", { path: "logs" })).toBe("app.log");
+    });
+  });
+
+  it("finds files by glob pattern", async () => {
+    await inGitProject(async () => {
+      const find = (args) => runTool("find_files", args);
+
+      expect(await find({ pattern: "*.js" })).toBe("src/a.js\nsrc/b.test.js\nsrc/lib/c.js");
+      expect(await find({ pattern: "src/*.js" })).toBe("src/a.js\nsrc/b.test.js");
+      expect(await find({ pattern: "/src/*.js" })).toBe("src/a.js\nsrc/b.test.js");
+      expect(await find({ pattern: "**/*.TEST.js" })).toBe("src/b.test.js");
+      expect(await find({ pattern: "{readme,license}.md" })).toBe("README.md");
+      // With a path, the pattern can be relative to it or to the project.
+      expect(await find({ pattern: "lib/*.js", path: "src" })).toBe("src/lib/c.js");
+      expect(await find({ pattern: "src/lib/*", path: "src" })).toBe("src/lib/c.js");
+
+      expect(await find({ pattern: "*.js", path: "dist" })).toBe("dist/out.js");
+      expect(await find({ pattern: "*.log" })).toBe("no files found (files git ignores were not searched)");
+      await expect(find({ pattern: "*", path: "README.md" })).rejects.toThrow("not a folder");
+      await expect(find({ pattern: " " })).rejects.toThrow("must not be empty");
+    });
+  });
+
+  it("greps files git doesn't ignore, optionally only those matching a glob", async () => {
+    await inGitProject(async () => {
+      expect(await runTool("grep", { pattern: "^export" })).toBe("src/a.js:1:export const a = 1;\nsrc/lib/c.js:1:export const c = 3;");
+      expect(await runTool("grep", { pattern: "a", glob: "*.test.js" })).toBe("src/b.test.js:1:import { a } from './a.js';");
+      expect(await runTool("grep", { pattern: "built" })).toBe("no matches (files git ignores were not searched)");
+      expect(await runTool("grep", { pattern: "built", path: "dist" })).toBe("dist/out.js:1:export const built = 1;");
+      expect(await runTool("grep", { pattern: "failed", path: "logs" })).toBe("logs/app.log:1:export failed");
+    });
+  });
+
+  it("ignores nothing when git ignores the whole project", async () => {
+    // Like a project inside a home folder kept in git with "*" in its .gitignore.
+    await inTempDir(async () => {
+      git("init", "-q");
+      writeFiles({ ".gitignore": "*\n", "project/src/a.js": "x\n" });
+      chdir("project");
+      expect(await runTool("list_dir", { recursive: true })).toBe("src/\nsrc/a.js");
+    });
+  });
+});
+
+describe("globToRegExp", () => {
+  const matches = (glob, path) => globToRegExp(glob).test(path);
+
+  it("matches * and ? within a name, and ** across folders", () => {
+    expect(matches("*.js", "a.js")).toBe(true);
+    expect(matches("*.js", "src/a.js")).toBe(false);
+    expect(matches("**/*.js", "a.js")).toBe(true);
+    expect(matches("**/*.js", "src/lib/a.js")).toBe(true);
+    expect(matches("src/**", "src/lib/a.js")).toBe(true);
+    expect(matches("file?.txt", "file1.txt")).toBe(true);
+    expect(matches("file?.txt", "file12.txt")).toBe(false);
+  });
+
+  it("supports alternatives and character sets, ignores case, and treats other characters literally", () => {
+    expect(matches("{README,CHANGELOG}.md", "readme.md")).toBe(true);
+    expect(matches("{README,CHANGELOG}.md", "LICENSE.md")).toBe(false);
+    expect(matches("[ab].js", "b.js")).toBe(true);
+    expect(matches("[!ab].js", "b.js")).toBe(false);
+    expect(matches("[!ab].js", "c.js")).toBe(true);
+    expect(matches("a(1)+.js", "a(1)+.js")).toBe(true);
+    expect(matches("a.js", "abjs")).toBe(false);
+    expect(() => globToRegExp("{a,b")).toThrow("unclosed {");
+  });
+});
+
+describe("shellTimeout", () => {
+  it("defaults to 120 seconds and stays within 1-600", () => {
+    expect(shellTimeout()).toBe(120);
+    expect(shellTimeout(5)).toBe(5);
+    expect(shellTimeout(10_000)).toBe(600);
+    expect(shellTimeout(-3)).toBe(1);
+    expect(shellTimeout("soon")).toBe(120);
+  });
+});
+
+describe("read_file", () => {
+  it("returns long files in whole-line parts that say where to continue", async () => {
+    await inTempDir(async () => {
+      // 2000 lines of 10 characters each (with the line break): twice the output limit.
+      const lines = Array.from({ length: 2000 }, (_, i) => String(i + 1).padStart(9, "0"));
+      mkdirSync("src");
+      writeFileSync("src/long.txt", `${lines.join("\r\n")}\r\n`);
+
+      expect(await runTool("read_file", { path: "src/long.txt" })).toBe(
+        `${lines.slice(0, 1000).join("\n")}\n[showing lines 1-1000 of 2000; continue with start_line=1001]`,
+      );
+      expect(await runTool("read_file", { path: "src/long.txt", start_line: 1001 })).toBe(lines.slice(1000).join("\n"));
+    });
+  });
+
+  it("rejects binary files and bad ranges, and says when a file is empty", async () => {
+    await inTempDir(async () => {
+      mkdirSync("src");
+      writeFileSync("src/image.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]));
+      writeFileSync("src/empty.txt", "");
+      writeFileSync("src/a.txt", "one\ntwo\n");
+
+      await expect(runTool("read_file", { path: "src/image.png" })).rejects.toThrow("binary file");
+      expect(await runTool("read_file", { path: "src/empty.txt" })).toBe("(empty file)");
+      await expect(runTool("read_file", { path: "src/a.txt", start_line: 3 })).rejects.toThrow("Line 3 is outside the file (2 lines)");
+      await expect(runTool("read_file", { path: "src/a.txt", start_line: 2, end_line: 1 })).rejects.toThrow("before start_line");
+    });
+  });
+});
+
+describe("line endings", () => {
+  it("edits CRLF files using the LF strings models write, and keeps them CRLF", async () => {
+    await inTempDir(async () => {
+      mkdirSync("src");
+      writeFileSync("src/a.js", "function a() {\r\n  return 1;\r\n}\r\n");
+
+      expect(await runTool("read_file", { path: "src/a.js" })).toBe("function a() {\n  return 1;\n}");
+      await runTool("edit_file", { path: "src/a.js", old_string: "{\n  return 1;\n}", new_string: "{\n  // two\n  return 2;\n}" });
+      await runTool("edit_file", { path: "src/a.js", old_string: "function a()", new_string: "// a\nfunction a()" });
+
+      expect(readFileSync("src/a.js", "utf8")).toBe("// a\r\nfunction a() {\r\n  // two\r\n  return 2;\r\n}\r\n");
+    });
+  });
+
+  it("keeps an existing file's line endings when writing or appending", async () => {
+    await inTempDir(async () => {
+      mkdirSync("src");
+      writeFileSync("src/crlf.txt", "a\r\nb\r\n");
+      writeFileSync("src/lf.txt", "a\nb\n");
+
+      await runTool("write_file", { path: "src/crlf.txt", content: "x\ny\n" });
+      await runTool("append_file", { path: "src/crlf.txt", content: "z\n" });
+      await runTool("write_file", { path: "src/lf.txt", content: "x\r\ny\r\n" });
+      await runTool("write_file", { path: "src/new.txt", content: "x\r\ny\n" });
+
+      expect(readFileSync("src/crlf.txt", "utf8")).toBe("x\r\ny\r\nz\r\n");
+      expect(readFileSync("src/lf.txt", "utf8")).toBe("x\ny\n");
+      expect(readFileSync("src/new.txt", "utf8")).toBe("x\r\ny\n"); // a new file is written as given
+    });
   });
 });

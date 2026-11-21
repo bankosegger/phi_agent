@@ -7,7 +7,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Shell handling differs by platform (cmd.exe and taskkill on Windows), so test on both.
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -24,3 +28,19 @@ jobs:
 
       - name: Test
         run: npm test
+
+  sandbox-image:
+    # The image the agent runs in with --sandbox: check that it builds, has git, and runs the agent's code.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the sandbox image
+        run: docker build --tag phi-agent-sandbox .
+
+      - name: Check the image
+        run: |
+          docker run --rm --entrypoint git phi-agent-sandbox --version
+          docker run --rm --entrypoint node phi-agent-sandbox -e "import('/opt/phi-agent/src/agent-core.mjs').then(() => console.log('the agent loads'))"

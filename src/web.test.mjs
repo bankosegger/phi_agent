@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer } from "node:http";
-import { decodeEntities, fetchUrl, htmlToText, webUrl } from "./web.mjs";
+import { decodeEntities, fetchUrl, htmlToText, parseSearchResults, webSearch, webUrl } from "./web.mjs";
 
 const PAGE = `<!doctype html>
 <html>
@@ -66,10 +66,21 @@ const ROUTES = {
     res.writeHead(200, { "content-type": "text/plain" }).end(lines.join("\n"));
   },
   "/hang": () => {}, // never answers
+  "/search": (res) => res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(SEARCH_PAGE),
+  "/search-empty": (res) => res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end("<html><body><p>No results.</p></body></html>"),
 };
 
+// A search page in the shape of DuckDuckGo's HTML endpoint: a redirect link, an ad, an
+// attribute order swapped, and a repeat.
+const SEARCH_PAGE = `<!doctype html><html><head><title>node 22 - DuckDuckGo</title></head><body>
+<div class="result"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fnodejs.org%2Fdocs%2Fv22">Node.js v22 docs</a><div class="result__snippet">Latest LTS release notes &amp; API.</div></div>
+<div class="result result--ad"><a class="result__a" href="https://ad.example.com">Buy node</a><div class="result__snippet">Sponsored.</div></div>
+<div class="result"><a href="https://example.com/a" class="result__a">Example A</a><div class="result__snippet">First &lt;b&gt;hit&lt;/b&gt;.</div></div>
+<div class="result"><a class="result__a" href="https://example.com/a">Repeat A</a><div class="result__snippet">dup</div></div>
+</body></html>`;
+
 beforeAll(async () => {
-  server = createServer((req, res) => (ROUTES[req.url] ?? ((r) => r.writeHead(500).end()))(res));
+  server = createServer((req, res) => (ROUTES[new URL(req.url, "http://x").pathname] ?? ((r) => r.writeHead(500).end()))(res));
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${server.address().port}`;
 });
@@ -156,5 +167,39 @@ describe("webUrl", () => {
     expect(() => webUrl("example.com")).toThrow("isn't a URL; give a full one");
     expect(() => webUrl("file:///etc/passwd")).toThrow("only fetches http and https URLs");
     expect(() => webUrl(undefined)).toThrow("isn't a URL");
+  });
+});
+
+describe("parseSearchResults", () => {
+  it("reads result anchors: unwraps redirects, skips ads and repeats, keeps snippets", () => {
+    expect(parseSearchResults(SEARCH_PAGE, "https://html.duckduckgo.com/html/")).toEqual([
+      { title: "Node.js v22 docs", url: "https://nodejs.org/docs/v22", snippet: "Latest LTS release notes & API." },
+      { title: "Example A", url: "https://example.com/a", snippet: "First <b>hit</b>." },
+    ]);
+    expect(parseSearchResults(SEARCH_PAGE, "https://html.duckduckgo.com/html/", 1)).toHaveLength(1);
+    expect(parseSearchResults("<p>nothing here</p>", "https://x/")).toEqual([]);
+  });
+});
+
+describe("webSearch", () => {
+  it("returns the results as numbered text", async () => {
+    const text = await webSearch("node 22", { endpoint: `${base}/search` });
+    expect(text).toBe(
+      [
+        "Search results for node 22:",
+        "",
+        "1. Node.js v22 docs",
+        "   https://nodejs.org/docs/v22",
+        "   Latest LTS release notes & API.",
+        "2. Example A",
+        "   https://example.com/a",
+        "   First <b>hit</b>.",
+      ].join("\n"),
+    );
+  });
+
+  it("says when there are no results, and needs a query", async () => {
+    expect(await webSearch("zzz", { endpoint: `${base}/search-empty` })).toBe("No results for zzz.");
+    await expect(webSearch("  ", { endpoint: `${base}/search` })).rejects.toThrow("web_search needs a query");
   });
 });

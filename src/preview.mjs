@@ -204,6 +204,10 @@ export function previewToolCall(name, args) {
     return { summary: `${args.url}${Number(args.start) > 0 ? ` (from character ${args.start})` : ""}`, lines: [] };
   }
 
+  if (name === "web_search") {
+    return { summary: String(args.query ?? ""), lines: [] };
+  }
+
   if (name === "process_output") {
     return { summary: `process ${args.id}${Number(args.wait) > 0 ? ` (waits up to ${args.wait}s)` : ""}`, lines: [] };
   }

@@ -14,7 +14,7 @@ export const SKIPPED = "skipped by user";
 // Plan mode: the model looks around and replies with a plan, changing nothing. Only these tools
 // run; the others are refused, though still offered, since some providers reject a request
 // whose history has calls to tools it doesn't list.
-const LOOKING_TOOLS = new Set(["read_file", "list_dir", "find_files", "grep", "git", "view_image", "fetch_url", "process_output"]);
+const LOOKING_TOOLS = new Set(["read_file", "list_dir", "find_files", "grep", "git", "view_image", "fetch_url", "web_search", "process_output"]);
 export const PLAN_NOTE =
   "(Plan mode: look around as much as you need, but change nothing: no file changes, and no commands. Reply with a plan of what you would do and why, for me to approve.)";
 const PLAN_REFUSAL = "plan mode is on, so nothing can be changed or run yet: put this step in your plan instead";
@@ -63,7 +63,7 @@ export function systemPrompt({
 
   const lines = [
     "You are a basic coding agent. Use tools to inspect and change project files.",
-    "Prefer read_file, list_dir, find_files, grep and git over shell for exploring the project, and fetch_url over curl for reading web pages. Use edit_file for small changes to existing files.",
+    "Prefer read_file, list_dir, find_files, grep and git over shell for exploring the project, and web_search to find pages on the web, then fetch_url over curl to read them. Use edit_file for small changes to existing files.",
     "Delete, move and rename files and folders with delete_file and move_file rather than shell, so the user can undo it.",
     "Start servers and watchers that keep running with shell's background option, check on them with process_output, and stop them with stop_process when you no longer need them, unless the user wants them left running.",
     "New files can't be created at the project root: put them in a folder like src/. Existing root files, like package.json or README.md, can be edited. Save generated output that isn't project source, like a report or an export, with write_asset.",

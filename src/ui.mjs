@@ -49,6 +49,7 @@ export const TOOL_LABELS = {
   git: "Git",
   view_image: "View",
   fetch_url: "Fetch",
+  web_search: "Web",
   process_output: "Output",
   stop_process: "Stop",
   shell: "Run",
@@ -61,7 +62,7 @@ export const TOOL_LABELS = {
 };
 
 // Tools that only look around. Their calls are shown quietly; calls that change things stand out.
-const LOOKING_TOOLS = new Set(["read_file", "list_dir", "find_files", "grep", "git", "view_image", "fetch_url", "process_output"]);
+const LOOKING_TOOLS = new Set(["read_file", "list_dir", "find_files", "grep", "git", "view_image", "fetch_url", "web_search", "process_output"]);
 
 const INDENT = "  ";
 
@@ -107,6 +108,7 @@ const QUESTIONS = {
   delete_file: () => "Delete this?",
   move_file: () => "Move this?",
   fetch_url: () => "Fetch this page?",
+  web_search: () => "Search the web?",
   stop_process: () => "Stop this process?",
   // Files that may hold secrets.
   read_file: () => "Let the model read it?",

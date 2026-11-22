@@ -16,7 +16,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { imagePart } from "./images.mjs";
 import { backgroundProcesses, killProcessTree, spawnShell } from "./processes.mjs";
-import { fetchUrl, webUrl } from "./web.mjs";
+import { fetchUrl, webSearch, webUrl } from "./web.mjs";
 
 const ASSET_DIR = ".agent/assets";
 const SHELL_TIMEOUT_DEFAULT = 120; // seconds
@@ -214,6 +214,22 @@ export const tools = [
   {
     type: "function",
     function: {
+      name: "web_search",
+      description:
+        "Search the web for a query and get the top results, each with its title, URL and a short snippet (DuckDuckGo, no API key needed). Use it to find documentation, issues or answers; fetch_url a result to read it.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "What to search for, in a few words" },
+          max_results: { type: "integer", description: "How many results to return, 1-10 (default 8)" },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "edit_file",
       description:
         "Replace one exact occurrence of old_string with new_string in a file. Fails if old_string is missing or appears more than once, so include enough context to make it unique.",
@@ -312,7 +328,7 @@ export function toolsFor({ images = true } = {}) {
   return images ? tools : tools.filter((tool) => tool.function.name !== "view_image");
 }
 
-const CONFIRMED_TOOLS = new Set(["shell", "write_file", "write_asset", "edit_file", "append_file", "delete_file", "move_file", "fetch_url"]);
+const CONFIRMED_TOOLS = new Set(["shell", "write_file", "write_asset", "edit_file", "append_file", "delete_file", "move_file", "fetch_url", "web_search"]);
 
 // Files that hold secrets, like API keys, passwords and private keys, by name. Templates like
 // .env.example hold none.
@@ -1058,6 +1074,9 @@ const CHECKS = {
   delete_file: plannedDelete,
   move_file: plannedMove,
   fetch_url: (args) => webUrl(args.url),
+  web_search: (args) => {
+    if (!String(args?.query ?? "").trim()) throw new Error("query must not be empty");
+  },
 };
 
 // Throws if a tool call that needs confirmation would fail anyway, like an edit whose
@@ -1107,6 +1126,10 @@ export async function runTool(name, args, { signal, changes } = {}) {
 
   if (name === "fetch_url") {
     return fetchUrl(args.url, { start: args.start, maxChars: MAX_TOOL_OUTPUT, signal });
+  }
+
+  if (name === "web_search") {
+    return webSearch(requireString(args, "query"), { maxResults: args.max_results, signal });
   }
 
   // Models often send "" or null for "the project root".

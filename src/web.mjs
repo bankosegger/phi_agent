@@ -233,7 +233,7 @@ async function getPage(url, signal) {
     throw new Error(`${response.url || url} answered ${response.status} ${response.statusText}${excerpt ? `: ${excerpt}` : ""}`);
   }
 
-  const page = { url: response.url || url, title, text, truncated };
+  const page = { url: response.url || url, title, text, raw, truncated };
   cache.delete(url);
   cache.set(url, { page, fetchedAt: Date.now() });
   while (cache.size > CACHE_SIZE) cache.delete(cache.keys().next().value);
@@ -250,6 +250,68 @@ export function webUrl(url) {
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("fetch_url only fetches http and https URLs");
   return parsed;
+}
+
+const SEARCH_URL = "https://html.duckduckgo.com/html/";
+
+/**
+ * The results of a web search, parsed from a search page's HTML: the anchors marked as results
+ * (class `result__a`), each with its title, URL (DuckDuckGo's redirect unwrapped) and the
+ * snippet that follows it, up to `maxResults`. Ads (`result--ad`) and repeats are left out.
+ */
+export function parseSearchResults(html, baseUrl, maxResults = 8) {
+  const results = [];
+  const seen = new Set();
+  let at = 0;
+  while (results.length < maxResults) {
+    const open = html.indexOf("<a ", at);
+    if (open === -1) break;
+    const tagEnd = html.indexOf(">", open);
+    const close = html.toLowerCase().indexOf("</a", tagEnd);
+    if (tagEnd === -1 || close === -1) break;
+    const attrs = html.slice(open + 3, tagEnd);
+    at = close + 4;
+    if (!attrs.includes("result__a")) continue;
+    // An ad's anchor sits in a div marked result--ad.
+    const divStart = html.lastIndexOf("<div", open);
+    if (divStart !== -1 && html.slice(divStart, html.indexOf(">", divStart)).includes("result--ad")) continue;
+    const href = attrs.match(/href="([^"]*)"/i)?.[1] ?? attrs.match(/href='([^']*)'/i)?.[1] ?? "";
+    let url;
+    try {
+      url = new URL(decodeEntities(href), baseUrl).href;
+    } catch {
+      continue;
+    }
+    // DuckDuckGo links through a redirect; the real address is its uddg parameter.
+    if (url.includes("uddg=")) {
+      try {
+        url = new URL(url).searchParams.get("uddg") ?? url;
+      } catch {
+        // keep the redirect URL
+      }
+    }
+    const title = decodeEntities(stripTags(html.slice(tagEnd + 1, close))).replace(/\s+/g, " ").trim();
+    const snippet = decodeEntities(stripTags(html.slice(at).match(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\//i)?.[1] ?? ""))
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!title || !/^https?:\/\//i.test(url) || seen.has(url)) continue;
+    seen.add(url);
+    results.push({ title, url, snippet });
+  }
+  return results;
+}
+
+/**
+ * Search the web for `query` (DuckDuckGo's HTML endpoint by default, no API key needed) and
+ * return the top results as text: numbered, each with its title, URL and a short snippet.
+ */
+export async function webSearch(query, { maxResults = 8, signal, endpoint = SEARCH_URL } = {}) {
+  const q = String(query ?? "").trim();
+  if (!q) throw new Error("web_search needs a query");
+  const page = await getPage(`${endpoint}${endpoint.includes("?") ? "&" : "?"}q=${encodeURIComponent(q)}`, signal);
+  const results = parseSearchResults(page.raw, page.url, Math.max(1, Math.min(10, Math.floor(Number(maxResults)) || 8)));
+  if (!results.length) return `No results for ${q}.`;
+  return [`Search results for ${q}:`, "", ...results.flatMap((r, i) => [`${i + 1}. ${r.title}`, `   ${r.url}`, r.snippet && `   ${r.snippet}`].filter(Boolean))].join("\n");
 }
 
 /**

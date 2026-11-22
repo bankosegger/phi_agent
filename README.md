@@ -247,6 +247,7 @@ In the Docker sandbox, a server the agent starts can only be reached inside the 
 | `grep` | Regex search across project files, optionally only files matching a glob, or ignoring case | only to search a file that may hold secrets |
 | `git` | Read-only `status`, `diff` (optionally `--staged`), or `log` | no |
 | `fetch_url` | Fetch a web page as readable text, or other text like JSON. Long pages come in parts | yes |
+| `web_search` | Search the web (DuckDuckGo, no API key needed) and list the top results with titles, URLs and snippets | yes |
 | `view_image` | Look at an image in the project, like a screenshot. Only for models that can see images | no |
 | `edit_file` | Replace one unique string in a file | yes |
 | `write_file` | Write a file. New files go in a folder like `src/`, not the project root | yes |
@@ -262,7 +263,7 @@ In the Docker sandbox, a server the agent starts can only be reached inside the 
 
 Long `shell` output keeps its start and end, so the model still sees error summaries and the exit code.
 
-`fetch_url` turns HTML into text with its links, leaving out scripts, menus and footers, so the model can read documentation, an issue, or a page from a server it started. It asks first, like `shell`: a URL can carry data out of your project as well as bring it in.
+`fetch_url` turns HTML into text with its links, leaving out scripts, menus and footers, so the model can read documentation, an issue, or a page from a server it started. It asks first, like `shell`: a URL can carry data out of your project as well as bring it in. `web_search` asks too: the query goes to the search engine.
 
 `delete_file` and `move_file` remove the folders they leave empty, and `move_file` creates the folders the new path needs. So that `/undo` can put things back, they keep what they delete or move in memory, which is why they refuse folders with more than 1000 files or 50 MB, links, and folders with a `.git` inside (another repository). For those, the model has to use `shell`, which asks you first and which `/undo` can't reverse.
 

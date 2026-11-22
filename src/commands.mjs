@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { USER_DIR } from "./agent-core.mjs";
 
 // Your own slash commands: a prompt in a Markdown file, which /name runs as a task. A project's
@@ -95,6 +95,16 @@ export function commandTask(command, args = "") {
   const text = args.trim();
   if (command.prompt.includes("$ARGUMENTS")) return command.prompt.replaceAll("$ARGUMENTS", text);
   return text ? `${command.prompt}\n\n${text}` : command.prompt;
+}
+
+/** Where a command's file is, as the user knows it: .phi-agent/commands/<name>.md, or with ~/ for your own. */
+export function commandPath({ scope, file }) {
+  return `${scope === "user" ? `~/${USER_DIR}` : USER_DIR}/${COMMANDS_FOLDER}/${basename(file)}`;
+}
+
+/** Whether a message starts like a command: "/help", "/review src/app.js". "/src/app.js" is a path. */
+export function isCommandLine(line) {
+  return /^\/[a-z0-9][\w-]*(\s|$)/i.test(line);
 }
 
 /**

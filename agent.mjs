@@ -5,7 +5,7 @@ import OpenAI from "openai";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { stdout as output } from "node:process";
 import { fileURLToPath } from "node:url";
 import {
@@ -21,9 +21,10 @@ import {
 import { FileChanges } from "./src/changes.mjs";
 import { DEFAULT_CLAUDE_MODEL, EFFORTS, dropThinking, fetchClaudeModels, isClaudeModel } from "./src/claude.mjs";
 import { USAGE, parseArgs } from "./src/cli-args.mjs";
-import { commandTask, findCommand, loadCommands, nearCommand } from "./src/commands.mjs";
+import { commandPath, commandTask, findCommand, isCommandLine, loadCommands, nearCommand } from "./src/commands.mjs";
 import { ContextWindow, fetchModels, isOverflowError, modelInfo } from "./src/context.mjs";
 import { imagePart, imagePathsIn } from "./src/images.mjs";
+import { mentionParts } from "./src/mentions.mjs";
 import { createMarkdownWriter } from "./src/markdown.mjs";
 import { completeLine } from "./src/complete.mjs";
 import { createInput } from "./src/input.mjs";
@@ -591,6 +592,19 @@ function showError(error, signal) {
   if (isOverflowError(error)) print(info("  The conversation is too long for this model. /compact summarizes it; /clear starts over."));
 }
 
+// The files a task names, as message parts: its images (see taskImages), and its @-mentioned
+// text files (see mentionParts), saying which were attached and which were left out.
+function taskAttachments(task) {
+  const parts = taskImages(task);
+  const mentions = mentionParts(task);
+  for (const part of mentions.parts) {
+    parts.push({ type: "text", text: part.text });
+    print(info(`${glyphs.arrow} Attached ${part.shown}`));
+  }
+  for (const { shown, reason } of mentions.leftOut) print(warning(`Left out ${shown}: ${reason}`));
+  return parts;
+}
+
 // The images a task names (see imagePathsIn), as message parts, saying which were attached.
 function taskImages(task) {
   const paths = imagePathsIn(task);
@@ -619,7 +633,7 @@ async function runTask(task, { title = task } = {}) {
   const usage = newUsage();
   const saved = [];
   lastBlock = "none";
-  const attachments = taskImages(task);
+  const attachments = taskAttachments(task);
   activeTask = controller;
   taskStartedAt = Date.now();
   let streamed = false;
@@ -879,10 +893,10 @@ async function runCommand(line) {
     const name = argument.split(/\s+/)[0]?.replace(/^\//, "").toLowerCase() ?? "";
     const own = name ? customCommands().get(name) : null;
     if (own) {
-      printLines(commandLines(own, commandFile(own)));
+      printLines(commandLines(own, commandPath(own)));
     } else if (!name || COMMANDS.includes(`/${name}`)) {
       const { commands, skipped } = loadCommands({ builtIn: COMMANDS });
-      printLines(helpLines(output.columns, glyphs, [...commands.values()], skipped.map((s) => ({ file: commandFile(s), reason: s.reason }))));
+      printLines(helpLines(output.columns, glyphs, [...commands.values()], skipped.map((s) => ({ file: commandPath(s), reason: s.reason }))));
     } else {
       const near = nearCommand(name, [...customCommands().keys()]);
       print(warning(`No command /${name}.${near ? ` Did you mean /${near}?` : " Type /help for commands."}`));
@@ -1003,7 +1017,7 @@ async function runPrint() {
     const reply = await agentTurn({
       ...modelOptions(),
       task,
-      attachments: taskImages(task),
+      attachments: taskAttachments(task),
       planMode,
       messages,
       changes,
@@ -1046,16 +1060,11 @@ function prompt() {
   return planMode ? `${theme.plan("plan")} ${mark} ` : `${mark} `;
 }
 
-// Where a command's file is, as the user knows it.
-function commandFile(command) {
-  return `${command.scope === "user" ? `~/${USER_DIR}` : USER_DIR}/commands/${basename(command.file)}`;
-}
-
 // Runs what the user entered: a command, one of their own commands, or a task. Resolves to
 // false when the CLI should quit.
 async function handleInput(line) {
   // "/help" is a command; "/src/app.js is broken" is a task.
-  if (!/^\/[a-z0-9][\w-]*(\s|$)/i.test(line)) {
+  if (!isCommandLine(line)) {
     print();
     await runTask(line);
     print();
@@ -1065,7 +1074,7 @@ async function handleInput(line) {
   const own = findCommand(line, customCommands());
   if (own) {
     print();
-    print(info(`${glyphs.arrow} /${own.command.name}, from ${commandFile(own.command)}`));
+    print(info(`${glyphs.arrow} /${own.command.name}, from ${commandPath(own.command)}`));
     await runTask(commandTask(own.command, own.args), { title: line });
     print();
     return true;

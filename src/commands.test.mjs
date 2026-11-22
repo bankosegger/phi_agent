@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { commandTask, findCommand, loadCommands, nearCommand, parseCommand } from "./commands.mjs";
+import { commandPath, commandTask, findCommand, isCommandLine, loadCommands, nearCommand, parseCommand } from "./commands.mjs";
 
 // A project folder and a home folder, each with these command files in .phi-agent/commands.
 function folders({ project = {}, home = {} }) {
@@ -86,6 +86,25 @@ describe("commandTask and findCommand", () => {
     expect(findCommand("/reviews", commands)).toBe(null);
     expect(findCommand("/review/x", commands)).toBe(null);
     expect(findCommand("review this", commands)).toBe(null);
+  });
+});
+
+describe("commandPath", () => {
+  it("names a command's file as the user knows it", () => {
+    expect(commandPath({ scope: "project", file: join("/p", ".phi-agent", "commands", "review.md") })).toBe(".phi-agent/commands/review.md");
+    expect(commandPath({ scope: "user", file: join("/h", ".phi-agent", "commands", "explain.md") })).toBe("~/.phi-agent/commands/explain.md");
+  });
+});
+
+describe("isCommandLine", () => {
+  it("tells a command from a task", () => {
+    expect(isCommandLine("/help")).toBe(true);
+    expect(isCommandLine("/review src/app.js")).toBe(true);
+    expect(isCommandLine("/Fix-Tests")).toBe(true);
+    expect(isCommandLine("/src/app.js is broken")).toBe(false);
+    expect(isCommandLine("/review/x")).toBe(false);
+    expect(isCommandLine("fix /the tests")).toBe(false);
+    expect(isCommandLine("/")).toBe(false);
   });
 });
 

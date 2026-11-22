@@ -225,7 +225,7 @@ const KEYS = [
 const TIPS = [
   "Messages you enter while the agent works run after the task. Pasted lines are sent together as one message. To type a message of several lines, end each line but the last with \\.",
   "Add your own commands: a prompt in .phi-agent/commands/<name>.md, in the project or in your home folder, runs with /<name>. $ARGUMENTS in it stands for what you write after the command.",
-  "To show the model an image, put its path in your message (drag the file into the terminal), or @ and a project path, like @docs/mockup.png.",
+  "To show the model an image, put its path in your message (drag the file into the terminal), or @ and a project path, like @docs/mockup.png. @ a text file, like @src/app.js, and the model gets its content too (up to 100 KB; files that may hold secrets are left out).",
   'At a confirmation, answer y (yes), n (no), or a (always): from then on, in this project, commands that start the same way run without asking, and so do pages from the same site, or the same file tool. Commands that chain others, and ones like rm, always ask.',
 ];
 

@@ -9,7 +9,8 @@ Options:
   --sandbox         Run in a Docker container that can only reach this folder
   --model <id>      Use this model: one on OpenRouter, like openai/gpt-4o-mini, or
                     a Claude model through the Claude API, like claude-opus-5-5
-  --print, -p       Run the task, print the reply and exit: for scripts and CI
+  --print, -p       Run the task, print the reply and exit: for scripts and CI;
+                    a task starting with /name runs your command of that name
   --yes, -y         Approve every tool call without asking (with --print, or alone)
   --plan            Start in plan mode: the agent only looks around and replies with a plan
   --version, -v     Show the version

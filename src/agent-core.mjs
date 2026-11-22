@@ -435,7 +435,8 @@ async function makeRoom({ taskStart, overflowed = false, ...options }) {
  * and `onContextChange({ type, count })` hears when old tool output was "trimmed" or earlier
  * messages "compacted" into a summary.
  * File changes are recorded in `changes` (a FileChanges), if given, so they can be undone.
- * `attachments` are image parts (see imagePart in images.mjs) to send with the task. Unless
+ * `attachments` are message parts to send with the task, like image parts (see imagePart in
+ * images.mjs) or @-mentioned files (see mentionParts in mentions.mjs). Unless
  * `canSeeImages` is false, the model gets the view_image tool; if it is false, images earlier in
  * the conversation are left out of requests. In `planMode`, the model is asked for a plan, and
  * only tools that look around run.

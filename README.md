@@ -221,6 +221,8 @@ To show the model a screenshot, put the image's path in your message: drag the f
 
 Both need a model that can see images. `/model` says whether yours can, from its model list; with one that can't, the model gets only the file names. In the Docker sandbox, only images inside the project can be attached.
 
+A text file named with `@`, like `@src/app.js`, is attached to the message too, up to 100 KB, so the model reads it without a tool call. Files that may hold secrets, like `.env`, are left out — what the model reads goes to its provider — and so are files over the limit or that aren't text; for those the model uses `read_file`, which asks first.
+
 ### Background processes
 
 A command that doesn't exit, like a dev server or a file watcher, would hold up the agent until its time limit. The agent runs those in the background instead: it sees their first output, reads what they print later with `process_output`, and stops them with `stop_process`, so it can start a server and then test against it. Up to 5 can run at once.

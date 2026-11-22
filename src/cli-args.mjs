@@ -12,6 +12,7 @@ Options:
   --print, -p       Run the task, print the reply and exit: for scripts and CI
   --yes, -y         Approve every tool call without asking (with --print, or alone)
   --plan            Start in plan mode: the agent only looks around and replies with a plan
+  --version, -v     Show the version
   --help, -h        Show this help`;
 
 const FLAGS = {
@@ -23,17 +24,19 @@ const FLAGS = {
   "--yes": "yes",
   "-y": "yes",
   "--plan": "plan",
+  "--version": "version",
+  "-v": "version",
   "--help": "help",
   "-h": "help",
 };
 
 /**
- * Reads the arguments: { options: { continue, sandbox, print, yes, plan, help, model }, task }.
+ * Reads the arguments: { options: { continue, sandbox, print, yes, plan, version, help, model }, task }.
  * An argument is an option only if it is one exactly, so a task like "explain -c" (one argument)
  * stays whole. Throws for --model without a model.
  */
 export function parseArgs(argv) {
-  const options = { continue: false, sandbox: false, print: false, yes: false, plan: false, help: false, model: null };
+  const options = { continue: false, sandbox: false, print: false, yes: false, plan: false, version: false, help: false, model: null };
   const words = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];

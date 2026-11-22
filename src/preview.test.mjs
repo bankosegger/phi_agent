@@ -200,6 +200,13 @@ describe("previewToolCall", () => {
     });
   });
 
+  it("says why reading a file that may hold secrets asks first", () => {
+    const note = [{ kind: "note", text: "It may hold secrets, like API keys, and what the model reads goes to its provider." }];
+    expect(previewToolCall("read_file", { path: ".env" })).toEqual({ summary: ".env", lines: note });
+    expect(previewToolCall("grep", { pattern: "KEY", path: "deploy/.env.local" }).lines).toEqual(note);
+    expect(previewToolCall("read_file", { path: ".env.example" }).lines).toEqual([]);
+  });
+
   it("caps long previews", () => {
     const content = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
     const { lines } = previewToolCall("write_asset", { path: "x.txt", content });
@@ -240,6 +247,11 @@ describe("previewToolResult", () => {
   it("shows why a tool failed", () => {
     expect(previewToolResult("edit_file", { status: "error", content: "error: old_string not found" })).toEqual([
       { kind: "error", text: "old_string not found" },
+    ]);
+    // Only the first line, without the colon that introduces what follows for the model.
+    const hint = "error: old_string not found, but line 2 matches it apart from spaces and tabs:\n\treturn 1;\nCopy that text exactly into old_string.";
+    expect(previewToolResult("edit_file", { status: "error", content: hint })).toEqual([
+      { kind: "error", text: "old_string not found, but line 2 matches it apart from spaces and tabs" },
     ]);
   });
 

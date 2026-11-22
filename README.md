@@ -4,6 +4,8 @@ A minimal Node.js coding agent with a basic CLI loop.
 
 ## Setup
 
+You need Node.js 22.1 or later.
+
 ```bash
 npm install
 cp .env.example .env # or create .env manually
@@ -44,7 +46,7 @@ npm run agent -- --continue                    # the last conversation in this f
 npm run agent -- --print "summarize README.md" # prints the reply and exits
 ```
 
-`--help` lists the options: `--continue` (`-c`), `--sandbox`, `--model <id>`, `--plan`, `--print` (`-p`) and `--yes` (`-y`).
+`--help` lists the options: `--continue` (`-c`), `--sandbox`, `--model <id>`, `--plan`, `--print` (`-p`), `--yes` (`-y`) and `--version` (`-v`).
 
 ### In another project
 
@@ -136,7 +138,7 @@ Tab completes commands, model IDs after `/model`, and file paths. The up arrow b
 
 When the agent needs you after working a while, at a confirmation after 10 seconds or at the end of a task that took 30, it rings the terminal's bell, which can flash the window or mark its tab. `BELL=off` in `.env` silences it.
 
-Each tool call gets a line, like `● Edit src/app.js` or `● Run npm test`; calls that only look around, like reading a file, are dimmed, so the ones that change something stand out. Before a tool that changes files runs, the agent shows what it will do. `edit_file`, and `write_file` on an existing file, show the lines that change with a little context, numbered as in the file. A new file shows its first lines, and so does a file about to be deleted; a folder about to be deleted shows its files. After a `shell` command, you see the last lines of its output, whether it worked, and how long it took. If any tool fails, you see why. A call that would fail anyway, like an edit of text that isn't in the file, is reported without asking you to approve it.
+Each tool call gets a line, like `● Edit src/app.js` or `● Run npm test`; calls that only look around, like reading a file, are dimmed, so the ones that change something stand out. Before a tool that changes files runs, the agent shows what it will do. `edit_file`, and `write_file` on an existing file, show the lines that change with a little context, numbered as in the file. A new file shows its first lines, and so does a file about to be deleted; a folder about to be deleted shows its files. After a `shell` command, you see the last lines of its output, whether it worked, and how long it took. If any tool fails, you see why. A call that would fail anyway, like an edit of text that isn't in the file, is reported without asking you to approve it. For such an edit, the model is shown the closest text the file has, and told when only spaces and tabs differ, so it can fix the edit without reading the file again.
 
 When you skip a tool call, the model is told not to retry it and to ask you instead.
 
@@ -221,10 +223,10 @@ In the Docker sandbox, a server the agent starts can only be reached inside the 
 
 | Tool | Purpose | Asks for confirmation |
 | --- | --- | --- |
-| `read_file` | Read a file, optionally a line range. Long files come back in parts that say which line to continue from | no |
+| `read_file` | Read a file, optionally a line range. Long files come back in parts that say which line to continue from | only a file that may hold secrets, like `.env` |
 | `list_dir` | List a directory, optionally recursively | no |
 | `find_files` | Find files by glob pattern, like `*.test.js` or `src/**/*.ts` | no |
-| `grep` | Regex search across project files, optionally only files matching a glob, or ignoring case | no |
+| `grep` | Regex search across project files, optionally only files matching a glob, or ignoring case | only to search a file that may hold secrets |
 | `git` | Read-only `status`, `diff` (optionally `--staged`), or `log` | no |
 | `fetch_url` | Fetch a web page as readable text, or other text like JSON. Long pages come in parts | yes |
 | `view_image` | Look at an image in the project, like a screenshot. Only for models that can see images | no |
@@ -238,7 +240,7 @@ In the Docker sandbox, a server the agent starts can only be reached inside the 
 | `process_output` | Read what a background process printed since the last read | no |
 | `stop_process` | Stop a background process | no |
 
-`list_dir`, `find_files` and `grep` skip `node_modules`, `.git` and `.agent`. In a git repository they also skip what git ignores, like `dist/` or `.env`, so results stay about your source. `list_dir` names the ignored entries it left out, and naming an ignored folder as the `path` searches it anyway.
+`list_dir`, `find_files` and `grep` skip `node_modules`, `.git` and `.agent`. In a git repository they also skip what git ignores, like `dist/` or `.env`, so results stay about your source. `list_dir` names the ignored entries it left out, and naming an ignored folder as the `path` searches it anyway. `grep` also leaves out files that may hold secrets (see [Safety](#safety)), unless one is its `path`.
 
 Long `shell` output keeps its start and end, so the model still sees error summaries and the exit code.
 
@@ -250,7 +252,9 @@ Files keep their line endings. Models write `\n`, but Git for Windows checks fil
 
 ## Safety
 
-Commands, file changes and web requests ask before they run, unless a [permissions rule](#permissions) or `--yes` allows them. Reading and searching the project doesn't ask.
+Commands, file changes and web requests ask before they run, unless a [permissions rule](#permissions) or `--yes` allows them. Reading and searching the project doesn't ask, except for files that may hold secrets.
+
+What the model reads goes to its provider, so reading a file that may hold secrets asks first, every time: `.env` files (but not templates like `.env.example`), private keys and certificates (`id_rsa`, `.pem`, `.key` and the like), and credential files like `.npmrc`, `.netrc` and `credentials.json`. `grep` leaves them out of its searches, unless asked to search one.
 
 File tools are limited to relative paths inside the project. Absolute paths and `..` traversal are blocked.
 

@@ -108,6 +108,9 @@ const QUESTIONS = {
   move_file: () => "Move this?",
   fetch_url: () => "Fetch this page?",
   stop_process: () => "Stop this process?",
+  // Files that may hold secrets.
+  read_file: () => "Let the model read it?",
+  grep: () => "Let the model search it?",
 };
 
 // What answering "a" allows, from a permission rule (see permissions.mjs): commands that start

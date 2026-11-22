@@ -65,7 +65,9 @@ export function ruleFor(name, args) {
     const host = URL.parse(String(args?.url ?? "").trim())?.host;
     return host ? `fetch_url: ${host}` : null;
   }
-  return needsConfirmation(name) ? name : null;
+  // Reading a file that may hold secrets asks every time.
+  if (name === "read_file" || name === "grep") return null;
+  return needsConfirmation(name, args) ? name : null;
 }
 
 // Whether a rule allows a tool call.

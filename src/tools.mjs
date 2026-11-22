@@ -120,7 +120,7 @@ export const tools = [
     function: {
       name: "read_file",
       description:
-        "Read a text file inside the project. Optionally read only a 1-indexed, inclusive line range. Long files are returned in parts that say which line to continue from.",
+        "Read a text file inside the project. Optionally read only a 1-indexed, inclusive line range. Long files are returned in parts that say which line to continue from. Reading a file that may hold secrets, like .env or a private key, asks the user first.",
       parameters: {
         type: "object",
         properties: {
@@ -182,7 +182,7 @@ export const tools = [
     function: {
       name: "grep",
       description:
-        "Search project files for a regular expression. Returns path:line:text matches. Skips node_modules, .git, .agent and files git ignores.",
+        "Search project files for a regular expression. Returns path:line:text matches. Skips node_modules, .git, .agent, files git ignores, and files that may hold secrets, like .env, unless one is the path.",
       parameters: {
         type: "object",
         properties: {
@@ -312,8 +312,27 @@ export function toolsFor({ images = true } = {}) {
   return images ? tools : tools.filter((tool) => tool.function.name !== "view_image");
 }
 
-export function needsConfirmation(name) {
-  return ["shell", "write_file", "write_asset", "edit_file", "append_file", "delete_file", "move_file", "fetch_url"].includes(name);
+const CONFIRMED_TOOLS = new Set(["shell", "write_file", "write_asset", "edit_file", "append_file", "delete_file", "move_file", "fetch_url"]);
+
+// Files that hold secrets, like API keys, passwords and private keys, by name. Templates like
+// .env.example hold none.
+const SECRET_FILE = /^(\.env(\..+)?|.+\.env|id_(rsa|dsa|ecdsa|ed25519)|[._]netrc|\.npmrc|\.pypirc|\.git-credentials|credentials\.json)$|\.(pem|key|p12|pfx|jks|keystore)$/i;
+const TEMPLATE_FILE = /\.(example|sample|template|dist|defaults)$/i;
+
+/** Whether a file may hold secrets, going by its name, like .env or id_rsa. */
+export function isSecretFile(path) {
+  const name = basename(String(path ?? "").replaceAll("\\", "/"));
+  return SECRET_FILE.test(name) && !TEMPLATE_FILE.test(name);
+}
+
+/**
+ * Whether a tool call needs the user's OK: one that changes files, runs a command or fetches a
+ * page, and one that reads a file that may hold secrets, since what the model reads goes to its
+ * provider.
+ */
+export function needsConfirmation(name, args) {
+  if (name === "read_file" || name === "grep") return isSecretFile(args?.path);
+  return CONFIRMED_TOOLS.has(name);
 }
 
 export function safeProjectPath(path) {
@@ -734,16 +753,26 @@ function grep({ pattern, path, glob, ignoreCase }) {
     }
   };
 
+  // Files that may hold secrets are searched only when named as the path, which asks first.
+  const secrets = [];
   let skipped = [];
   if (statSync(root).isDirectory()) {
-    skipped = walk(root, (fullPath, isDir) => (isDir || !included(fullPath) ? undefined : searchFile(fullPath)));
+    skipped = walk(root, (fullPath, isDir) => {
+      if (isDir || !included(fullPath)) return;
+      if (isSecretFile(fullPath)) return void secrets.push(shownPath(fullPath));
+      return searchFile(fullPath);
+    });
   } else {
     searchFile(root);
   }
 
-  if (!matches.length) return skipped.length ? "no matches (files git ignores were not searched)" : "no matches";
+  const secretNote = secrets.length ? `files that may hold secrets were not searched: ${nameList(secrets)}` : null;
+  if (!matches.length) {
+    const notes = [skipped.length && "files git ignores were not searched", secretNote].filter(Boolean);
+    return notes.length ? `no matches (${notes.join("; ")})` : "no matches";
+  }
   const suffix = matches.length >= MAX_GREP_MATCHES ? `\n[stopped at ${MAX_GREP_MATCHES} matches]` : "";
-  return matches.join("\n") + suffix;
+  return matches.join("\n") + suffix + (secretNote ? `\n[${secretNote}]` : "");
 }
 
 /**
@@ -768,6 +797,131 @@ function shellCommand(args) {
   return args.cmd;
 }
 
+// --- Why an edit's old_string doesn't match ---
+
+const MAX_HINT_LINES = 12;
+const MAX_HINT_LINE_CHARS = 500;
+const MAX_HINT_FILE_LINES = 50_000;
+const MAX_LISTED_LINES = 6;
+
+// A line without its spaces and tabs, which models often get wrong: indentation above all.
+function squeezed(line) {
+  return line.replace(/\s+/g, "");
+}
+
+// Lines without the blank ones at the start and end, which models add or leave out.
+function withoutBlankEnds(lines) {
+  let start = 0;
+  let end = lines.length;
+  while (start < end && !lines[start].trim()) start++;
+  while (end > start && !lines[end - 1].trim()) end--;
+  return lines.slice(start, end);
+}
+
+// How alike two lines are, from 0 to 1: the share of their pairs of characters they have in
+// common (the Dice coefficient).
+function likeness(a, b) {
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return 0;
+  const pairs = new Map();
+  for (let i = 0; i < a.length - 1; i++) pairs.set(a.slice(i, i + 2), (pairs.get(a.slice(i, i + 2)) ?? 0) + 1);
+  let shared = 0;
+  for (let i = 0; i < b.length - 1; i++) {
+    const count = pairs.get(b.slice(i, i + 2));
+    if (count) {
+      shared++;
+      pairs.set(b.slice(i, i + 2), count - 1);
+    }
+  }
+  return (2 * shared) / (a.length + b.length - 2);
+}
+
+/**
+ * Where the file's `lines` come closest to old_string: { start, end, spacing } (0-based, end
+ * exclusive), where `spacing` says they are the same apart from spaces and tabs. Old_string may
+ * start and end within a line. Null when nothing in the file is much like it.
+ */
+function closestLines(lines, oldString) {
+  const wanted = withoutBlankEnds(oldString.split(/\r?\n/)).map(squeezed);
+  if (!wanted.length) return null;
+  const file = lines.map(squeezed);
+  const k = wanted.length;
+
+  // The same text apart from spaces and tabs: file line `line` against old_string's line j.
+  const fits = (line, j) => {
+    if (k === 1) return line.includes(wanted[0]);
+    if (j === 0) return line.endsWith(wanted[0]);
+    if (j === k - 1) return line.startsWith(wanted[j]);
+    return line === wanted[j];
+  };
+  for (let i = 0; i + k <= file.length; i++) {
+    if (wanted.every((_, j) => fits(file[i + j], j))) return { start: i, end: i + k, spacing: true };
+  }
+
+  // Where most of old_string's lines are, each counting less the more often it is in the file.
+  const where = new Map();
+  file.forEach((line, i) => where.set(line, [...(where.get(line) ?? []), i]));
+  const votes = new Map();
+  wanted.forEach((line, j) => {
+    if (!line) return; // a blank line could be any of them
+    const found = where.get(line) ?? [];
+    for (const i of found) votes.set(i - j, (votes.get(i - j) ?? 0) + 1 / found.length);
+  });
+  let best = null;
+  for (const [start, weight] of votes) if (weight >= 0.5 && (!best || weight > best.weight)) best = { start, weight };
+
+  // Or the line most like old_string's longest one.
+  if (!best) {
+    const anchor = wanted.reduce((longest, line, j) => (line.length > wanted[longest].length ? j : longest), 0);
+    let closest = { i: -1, score: 0.6 };
+    file.forEach((line, i) => {
+      const score = likeness(line, wanted[anchor]);
+      if (score > closest.score) closest = { i, score };
+    });
+    if (closest.i === -1) return null;
+    best = { start: closest.i - anchor };
+  }
+  const start = Math.max(0, best.start);
+  return { start, end: Math.min(file.length, Math.max(start + 1, best.start + k)), spacing: false };
+}
+
+// "4, 18 and 40", or "4, 18, 40, 52, 60 and 3 more"
+function andList(items) {
+  if (items.length > MAX_LISTED_LINES) return `${items.slice(0, MAX_LISTED_LINES - 1).join(", ")} and ${items.length - MAX_LISTED_LINES + 1} more`;
+  return items.length < 2 ? String(items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+}
+
+// Where `needle` is in `text`: "on line 4", or "on lines 4, 18 and 40".
+function linesOf(text, needle) {
+  const numbers = new Set();
+  for (let index = text.indexOf(needle); index !== -1; index = text.indexOf(needle, index + needle.length)) {
+    numbers.add(text.slice(0, index).split("\n").length);
+  }
+  return numbers.size === 1 ? `on line ${[...numbers][0]}` : `on lines ${andList([...numbers])}`;
+}
+
+/**
+ * Why old_string isn't in the file, for the model: the text that comes closest to it, as it is
+ * in the file, so it can fix the edit without reading the file again. The first line says it
+ * in short, for the user.
+ */
+function editMiss(text, oldString) {
+  const lines = text.split(/\r?\n/);
+  if (lines.length > MAX_HINT_FILE_LINES) return "old_string not found";
+  const found = closestLines(lines, oldString);
+  if (!found) return "old_string not found, and nothing in the file is much like it.\nRead the file to see what it has now.";
+
+  const { start, end, spacing } = found;
+  const where = end - start === 1 ? `line ${start + 1}` : `lines ${start + 1}-${end}`;
+  const head = spacing
+    ? `old_string not found, but ${where} ${end - start === 1 ? "matches" : "match"} it apart from spaces and tabs:`
+    : `old_string not found. The closest text, at ${where}, reads:`;
+  const tail = spacing ? "Copy that text exactly into old_string." : "If that is what you meant to change, copy it exactly into old_string.";
+  const shown = lines.slice(start, Math.min(end, start + MAX_HINT_LINES)).map((line) => (line.length > MAX_HINT_LINE_CHARS ? `${line.slice(0, MAX_HINT_LINE_CHARS)}…` : line));
+  const more = end - start > MAX_HINT_LINES ? [`[… ${end - start - MAX_HINT_LINES} more lines]`] : [];
+  return [head, ...shown, ...more, tail].join("\n");
+}
+
 // What edit_file would write: the file's full path and new text. Throws if the edit can't be made.
 function plannedEdit(args) {
   const path = safeProjectPath(args.path);
@@ -782,8 +936,8 @@ function plannedEdit(args) {
   const newString = withLineEndings(args.new_string, eol);
 
   const count = text.split(oldString).length - 1;
-  if (count === 0) throw new Error("old_string not found");
-  if (count > 1) throw new Error(`old_string appears ${count} times; add more context to make it unique`);
+  if (count === 0) throw new Error(editMiss(text, oldString));
+  if (count > 1) throw new Error(`old_string appears ${count} times, ${linesOf(text, oldString)}; add more context to make it unique`);
 
   // A replacer function avoids special "$" patterns in new_string.
   return { path, text: text.replace(oldString, () => newString) };

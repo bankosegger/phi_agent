@@ -57,6 +57,14 @@ const AGENT_DIR = dirname(fileURLToPath(import.meta.url));
 const ENV_FILE = join(AGENT_DIR, ".env");
 dotenv.config({ path: ENV_FILE, quiet: true });
 
+const VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(join(AGENT_DIR, "package.json"), "utf8")).version;
+  } catch {
+    return null;
+  }
+})();
+
 const cliArgs = process.argv.slice(2);
 let options;
 let firstTask;
@@ -68,6 +76,10 @@ try {
 }
 if (options.help) {
   console.log(USAGE);
+  process.exit(0);
+}
+if (options.version) {
+  console.log(VERSION ?? "unknown");
   process.exit(0);
 }
 
@@ -128,14 +140,6 @@ const effort = EFFORTS.find((level) => level === process.env.EFFORT?.trim().toLo
 if (process.env.EFFORT?.trim() && !effort) {
   console.error(theme.warning(`${glyphs.warn} EFFORT=${process.env.EFFORT} isn't a level Claude knows (${EFFORTS.join(", ")}), so each model uses its default.`));
 }
-
-const VERSION = (() => {
-  try {
-    return JSON.parse(readFileSync(join(AGENT_DIR, "package.json"), "utf8")).version;
-  } catch {
-    return null;
-  }
-})();
 
 // For Tab completion.
 const COMMANDS = ["/help", "/clear", "/resume", "/compact", "/undo", "/plan", "/model", "/processes", "/stop", "/permissions", "/exit", "/quit"];
@@ -479,19 +483,16 @@ function allowForGood(rule) {
 }
 
 async function confirmTool(name, args, signal) {
-  if (!needsConfirmation(name) || options.yes || allows(rules, name, args)) return true;
+  if (!needsConfirmation(name, args) || options.yes || allows(rules, name, args)) return true;
+  // A command that chains others, one that does damage that can't be undone, or reading a file
+  // that may hold secrets, has no "always".
+  const rule = ruleFor(name, args);
   if (HEADLESS) {
-    print(
-      outcomeLine('Skipped: it needs approval. Run with --yes, or allow it for good by answering "a" in an interactive session.', {
-        style: theme.warning,
-        symbol: glyphs.skip,
-      }),
-    );
+    const how = rule ? 'Run with --yes, or allow it for good by answering "a" in an interactive session.' : "Run with --yes to approve it.";
+    print(outcomeLine(`Skipped: it needs approval. ${how}`, { style: theme.warning, symbol: glyphs.skip }));
     return false;
   }
 
-  // A command that chains others, or that does damage that can't be undone, has no "always".
-  const rule = ruleFor(name, args);
   if (Date.now() - taskStartedAt >= BELL_AFTER_CONFIRM_MS) bell();
   status.stop();
   endLine();

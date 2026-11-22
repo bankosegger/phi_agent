@@ -530,7 +530,7 @@ describe("agentTurn checks and progress", () => {
       expect(asked).toEqual([]);
       expect(statuses).toEqual(["error", "error"]);
       expect(messages.filter((m) => m.role === "tool").map((m) => m.content)).toEqual([
-        "error: old_string not found",
+        "error: old_string not found, and nothing in the file is much like it.\nRead the file to see what it has now.",
         expect.stringMatching(/^error: New files can't be created at the project root/),
       ]);
     });

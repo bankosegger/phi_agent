@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
-import { safeProjectPath, shellTimeout } from "./tools.mjs";
+import { isSecretFile, safeProjectPath, shellTimeout } from "./tools.mjs";
 
 const MAX_PREVIEW_LINES = 12;
 const MAX_COUNTED_FILES = 1000;
@@ -21,6 +21,11 @@ function plural(count, word) {
 
 function clip(line) {
   return line.length > MAX_PREVIEW_WIDTH ? `${line.slice(0, MAX_PREVIEW_WIDTH)}…` : line;
+}
+
+// Why reading a file asks first, if it may hold secrets.
+function secretNote(path) {
+  return isSecretFile(path) ? [{ kind: "note", text: "It may hold secrets, like API keys, and what the model reads goes to its provider." }] : [];
 }
 
 // The first MAX_PREVIEW_LINES preview lines, and a note saying how many more there are.
@@ -208,7 +213,7 @@ export function previewToolCall(name, args) {
   }
 
   if (name === "read_file") {
-    return { summary: `${args.path}${lineRange(args.start_line, args.end_line)}`, lines: [] };
+    return { summary: `${args.path}${lineRange(args.start_line, args.end_line)}`, lines: secretNote(args.path) };
   }
 
   if (name === "list_dir") {
@@ -221,7 +226,7 @@ export function previewToolCall(name, args) {
 
   if (name === "grep") {
     const glob = args.glob ? ` (${args.glob})` : "";
-    return { summary: `/${args.pattern}/${args.ignore_case ? "i" : ""} in ${args.path || "."}${glob}`, lines: [] };
+    return { summary: `/${args.pattern}/${args.ignore_case ? "i" : ""} in ${args.path || "."}${glob}`, lines: secretNote(args.path) };
   }
 
   if (name === "git") {
@@ -307,7 +312,8 @@ const OUTPUT_TOOLS = new Set(["shell", "process_output", "stop_process"]);
  * skipped or cancelled calls, are left to the model.
  */
 export function previewToolResult(name, { status, content }) {
-  if (status === "error") return [{ kind: "error", text: clip(splitLines(content.replace(/^error: /, ""))[0] ?? "") }];
+  // An error's first line says what went wrong; what it introduces with a colon is for the model.
+  if (status === "error") return [{ kind: "error", text: clip((splitLines(content.replace(/^error: /, ""))[0] ?? "").replace(/:$/, "")) }];
   // A fetched page's title says which page it was.
   if (status === "ok" && name === "fetch_url") {
     const title = content.match(/^Title: (.+)/)?.[1];

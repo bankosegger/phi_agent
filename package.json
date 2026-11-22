@@ -1,10 +1,12 @@
 {
   "name": "phi_agent",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "A small coding agent for the terminal",
   "bin": {
     "phi-agent": "agent.mjs"
+  },
+  "engines": {
+    "node": ">=22.1"
   },
   "scripts": {
     "test": "vitest run",

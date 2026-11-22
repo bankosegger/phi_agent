@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { chdir, cwd } from "node:process";
 import { commandEnv } from "./processes.mjs";
-import { checkToolCall, globToRegExp, needsConfirmation, runTool, safeProjectPath, shellTimeout, toolsFor } from "./tools.mjs";
+import { checkToolCall, globToRegExp, isSecretFile, needsConfirmation, runTool, safeProjectPath, shellTimeout, toolsFor } from "./tools.mjs";
 
 // Whether process `pid` has ended, waiting up to 3 seconds for it. A killed process whose parent
 // was killed too is a zombie until the system reaps it, which kill(pid, 0) still finds; on
@@ -88,6 +88,26 @@ describe("needsConfirmation", () => {
     expect(needsConfirmation("list_dir")).toBe(false);
     expect(needsConfirmation("grep")).toBe(false);
     expect(needsConfirmation("git")).toBe(false);
+  });
+
+  it("requires it for reading or searching a file that may hold secrets", () => {
+    expect(needsConfirmation("read_file", { path: ".env" })).toBe(true);
+    expect(needsConfirmation("read_file", { path: "config\\keys\\server.pem" })).toBe(true);
+    expect(needsConfirmation("grep", { path: "deploy/.env.production", pattern: "KEY" })).toBe(true);
+    expect(needsConfirmation("read_file", { path: ".env.example" })).toBe(false);
+    expect(needsConfirmation("read_file", { path: "src/env.js" })).toBe(false);
+    expect(needsConfirmation("grep", { path: ".", pattern: "KEY" })).toBe(false);
+  });
+});
+
+describe("isSecretFile", () => {
+  it("knows files that hold secrets by their names, but not their templates", () => {
+    const secrets = [".env", ".ENV.local", "prod.env", "id_rsa", "id_ed25519", ".netrc", "_netrc", ".npmrc", ".pypirc", ".git-credentials", "credentials.json", "tls.key", "cert.pem", "store.p12", "app.pfx", "release.jks", "release.keystore"];
+    for (const name of secrets) expect(isSecretFile(`a/${name}`), name).toBe(true);
+    for (const name of [".env.example", ".env.sample", "secrets.env.template", "id_rsa.pub", "environment.ts", "keys.js", ".envrc.md", "README.md"]) {
+      expect(isSecretFile(name), name).toBe(false);
+    }
+    expect(isSecretFile(undefined)).toBe(false);
   });
 });
 
@@ -176,7 +196,9 @@ describe("runTool", () => {
 
       expect(await runTool("edit_file", { path: "src/a.txt", old_string: "cat", new_string: "$& bird" })).toBe("ok");
       expect(await runTool("read_file", { path: "src/a.txt" })).toBe("$& bird dog dog");
-      await expect(runTool("edit_file", { path: "src/a.txt", old_string: "dog", new_string: "x" })).rejects.toThrow("2 times");
+      await expect(runTool("edit_file", { path: "src/a.txt", old_string: "dog", new_string: "x" })).rejects.toThrow(
+        "old_string appears 2 times, on line 1; add more context to make it unique",
+      );
       await expect(runTool("edit_file", { path: "src/a.txt", old_string: "fish", new_string: "x" })).rejects.toThrow("not found");
       await expect(runTool("edit_file", { path: "src/b.txt", old_string: "x", new_string: "y" })).rejects.toThrow(
         "src/b.txt does not exist; create it with write_file",
@@ -185,6 +207,53 @@ describe("runTool", () => {
       chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("shows the model the text closest to an old_string that isn't in the file", async () => {
+    await inTempDir(async () => {
+      const code = ["function add(a, b) {", "\treturn a - b;", "}", "", "function sub(a, b) {", "\treturn a - b;", "}", "", "export { add, sub };"].join("\n");
+      writeFileSync("math.js", code);
+      const miss = (old_string) => runTool("edit_file", { path: "math.js", old_string, new_string: "x" }).then(() => "edited", (error) => error.message);
+
+      const copy = "Copy that text exactly into old_string.";
+      const check = "If that is what you meant to change, copy it exactly into old_string.";
+      // The usual slip: spaces where the file has a tab. The lines go back exactly as they are.
+      expect(await miss("function add(a, b) {\n  return a - b;\n}")).toBe(
+        ["old_string not found, but lines 1-3 match it apart from spaces and tabs:", "function add(a, b) {", "\treturn a - b;", "}", copy].join("\n"),
+      );
+      // Within a line, too, and from partway through one line to partway through another.
+      expect(await miss("export {add, sub}")).toBe(`old_string not found, but line 9 matches it apart from spaces and tabs:\nexport { add, sub };\n${copy}`);
+      expect(await miss("add(a,b) {\n  return a - b")).toBe(
+        ["old_string not found, but lines 1-2 match it apart from spaces and tabs:", "function add(a, b) {", "\treturn a - b;", copy].join("\n"),
+      );
+      // One line wrong: the others say where it is, even when the wrong one is the longest.
+      expect(await miss("function sub(a, b) {\n\treturn a + b;\n}")).toBe(
+        ["old_string not found. The closest text, at lines 5-7, reads:", "function sub(a, b) {", "\treturn a - b;", "}", check].join("\n"),
+      );
+      expect(await miss("function sub(a, b) {\n\treturn a + b + c + d + e + f;\n}")).toMatch(/^old_string not found\. The closest text, at lines 5-7, reads:/);
+      // Blank lines around old_string don't count.
+      expect(await miss("\nfunction add(a, b) {\n  return a - b;\n}\n")).toMatch(/^old_string not found, but lines 1-3 match it apart from spaces and tabs:/);
+      // A line that is nearly the same.
+      expect(await miss("expotr { add, sub }")).toBe(`old_string not found. The closest text, at line 9, reads:\nexport { add, sub };\n${check}`);
+      expect(await miss("class Calculator {}")).toBe("old_string not found, and nothing in the file is much like it.\nRead the file to see what it has now.");
+      expect(await miss("\treturn a - b;")).toBe("old_string appears 2 times, on lines 2 and 6; add more context to make it unique");
+    });
+  });
+
+  it("asks before searching a file that may hold secrets, and otherwise leaves them out of searches", async () => {
+    await inTempDir(async () => {
+      mkdirSync("src");
+      writeFileSync("src/app.js", "const key = process.env.API_KEY;\n");
+      writeFileSync(".env", "API_KEY=sk-secret\n");
+      writeFileSync(".env.example", "API_KEY=\n");
+
+      expect(await runTool("grep", { pattern: "API_KEY" })).toBe(
+        ".env.example:1:API_KEY=\nsrc/app.js:1:const key = process.env.API_KEY;\n[files that may hold secrets were not searched: .env]",
+      );
+      expect(await runTool("grep", { pattern: "sk-" })).toBe("no matches (files that may hold secrets were not searched: .env)");
+      // Named as the path, which asks the user first, it is searched.
+      expect(await runTool("grep", { pattern: "sk-", path: ".env" })).toBe(".env:1:API_KEY=sk-secret");
+    });
   });
 
   it("appends to files, creating them if needed", async () => {

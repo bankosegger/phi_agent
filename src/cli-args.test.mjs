@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseArgs } from "./cli-args.mjs";
 
-const NONE = { continue: false, sandbox: false, print: false, yes: false, plan: false, help: false, model: null };
+const NONE = { continue: false, sandbox: false, print: false, yes: false, plan: false, version: false, help: false, model: null };
 
 describe("parseArgs", () => {
   it("takes the words that aren't options as the task", () => {
@@ -24,9 +24,12 @@ describe("parseArgs", () => {
       print: true,
       yes: true,
       plan: false,
+      version: false,
       help: true,
       model: "openai/gpt-4o",
     });
+    expect(parseArgs(["--version"]).options).toEqual({ ...NONE, version: true });
+    expect(parseArgs(["-v"]).options).toEqual({ ...NONE, version: true });
   });
 
   it("needs a model after --model", () => {

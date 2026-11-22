@@ -58,6 +58,7 @@ describe("confirmPrompt", () => {
     // No rule, no "always": a command like rm always asks.
     expect(plain(confirmPrompt("shell", { cmd: "rm -rf dist", background: false }, null, g))).toBe("  ? Run this command? y/N › ");
     expect(plain(confirmPrompt("shell", { background: true }, null, g))).toBe("  ? Start this in the background? y/N › ");
+    expect(plain(confirmPrompt("read_file", { path: ".env" }, null, g))).toBe("  ? Let the model read it? y/N › ");
     // In a narrow terminal, the choices are only named, leaving room for the answer.
     expect(plain(confirmPrompt("edit_file", {}, "edit_file", g, 50))).toBe("  ? Make this edit? y/N/a › ");
   });

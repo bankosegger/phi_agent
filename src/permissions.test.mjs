@@ -54,6 +54,9 @@ describe("ruleFor and allows", () => {
     expect(ruleFor("fetch_url", { url: "not a url" })).toBe(null);
     expect(ruleFor("edit_file", { path: "src/a.js" })).toBe("edit_file");
     expect(ruleFor("read_file", { path: "src/a.js" })).toBe(null); // never asks anyway
+    // Reading a file that may hold secrets asks every time.
+    expect(ruleFor("read_file", { path: ".env" })).toBe(null);
+    expect(ruleFor("grep", { path: ".env", pattern: "KEY" })).toBe(null);
     expect(ruleFor("shell", { cmd: "rm -rf dist" })).toBe(null);
 
     const rules = ["fetch_url: docs.python.org", "edit_file"];

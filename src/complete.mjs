@@ -27,8 +27,8 @@ function entriesStartingWith(dir, start) {
  * Returns [completions, the end of the line they replace], as readline's completer does.
  */
 export function completeLine(line, { commands = [], models = [], cwd = process.cwd() } = {}) {
-  // A command is a slash and letters; "/home/me/sh" is a path.
-  if (/^\/[a-z]*$/i.test(line)) {
+  // A command is a slash and a name, like /fix-tests; "/home/me/sh" is a path.
+  if (/^\/[\w-]*$/i.test(line)) {
     return [commands.filter((command) => command.startsWith(line.toLowerCase())), line];
   }
   const model = line.match(/^\/model\s+(\S*)$/i);

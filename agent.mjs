@@ -5,7 +5,7 @@ import OpenAI from "openai";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { stdout as output } from "node:process";
 import { fileURLToPath } from "node:url";
 import {
@@ -21,6 +21,7 @@ import {
 import { FileChanges } from "./src/changes.mjs";
 import { DEFAULT_CLAUDE_MODEL, EFFORTS, dropThinking, fetchClaudeModels, isClaudeModel } from "./src/claude.mjs";
 import { USAGE, parseArgs } from "./src/cli-args.mjs";
+import { commandTask, findCommand, loadCommands, nearCommand } from "./src/commands.mjs";
 import { ContextWindow, fetchModels, isOverflowError, modelInfo } from "./src/context.mjs";
 import { imagePart, imagePathsIn } from "./src/images.mjs";
 import { createMarkdownWriter } from "./src/markdown.mjs";
@@ -36,6 +37,7 @@ import { displayWidth, glyphs, hasColors, theme, truncateEnd } from "./src/theme
 import { needsConfirmation } from "./src/tools.mjs";
 import {
   banner,
+  commandLines,
   confirmPrompt,
   detailLines,
   formatDuration,
@@ -143,6 +145,12 @@ if (process.env.EFFORT?.trim() && !effort) {
 
 // For Tab completion.
 const COMMANDS = ["/help", "/clear", "/resume", "/compact", "/undo", "/plan", "/model", "/processes", "/stop", "/permissions", "/exit", "/quit"];
+
+// The user's own slash commands (see commands.mjs), read afresh each time, so a command file
+// that was added or changed works at once.
+function customCommands() {
+  return loadCommands({ builtIn: COMMANDS }).commands;
+}
 
 // Plan mode (/plan, or --plan): tasks only look around and end in a plan.
 let planMode = options.plan;
@@ -299,10 +307,17 @@ if (!HEADLESS) {
         // A read-only project just doesn't keep its history.
       }
     },
-    completer: (line) => completeLine(line, { commands: COMMANDS, models: models ? [...models.keys()] : [] }),
+    completer: (line) =>
+      completeLine(line, {
+        commands: [...COMMANDS, ...[...customCommands().keys()].map((name) => `/${name}`)],
+        models: models ? [...models.keys()] : [],
+      }),
+    // A line ended with "\" goes on in the next one.
+    continuationPrompt: `${theme.muted(glyphs.continued)} `,
   });
   userInput.onInterrupt(() => {
-    if (!activeTask) return userInput.close();
+    // At the prompt, Ctrl+C throws away what was typed, and with nothing typed, quits.
+    if (!activeTask) return userInput.discardDraft() || userInput.close();
     activeTask.abort();
     const dropped = userInput.clearQueue();
     if (dropped) print(info(`  Dropped ${plural(dropped, "queued message")}`));
@@ -596,7 +611,9 @@ function taskImages(task) {
   return parts;
 }
 
-async function runTask(task) {
+// Runs a task. `title`, if given, is what the user entered for it, like "/review src", which
+// stands for it in the list of saved conversations.
+async function runTask(task, { title = task } = {}) {
   const controller = new AbortController();
   const changes = new FileChanges();
   const usage = newUsage();
@@ -657,7 +674,7 @@ async function runTask(task) {
     print(info(`Saved ${nameList(saved)}`));
   }
   showFooter(usage, taskStartedAt);
-  saveConversation(task);
+  saveConversation(title);
   if (Date.now() - taskStartedAt >= BELL_AFTER_TASK_MS) bell();
 }
 
@@ -859,7 +876,17 @@ async function runCommand(line) {
   if (command === "/exit" || command === "/quit") return false;
 
   if (command === "/help") {
-    printLines(helpLines(output.columns));
+    const name = argument.split(/\s+/)[0]?.replace(/^\//, "").toLowerCase() ?? "";
+    const own = name ? customCommands().get(name) : null;
+    if (own) {
+      printLines(commandLines(own, commandFile(own)));
+    } else if (!name || COMMANDS.includes(`/${name}`)) {
+      const { commands, skipped } = loadCommands({ builtIn: COMMANDS });
+      printLines(helpLines(output.columns, glyphs, [...commands.values()], skipped.map((s) => ({ file: commandFile(s), reason: s.reason }))));
+    } else {
+      const near = nearCommand(name, [...customCommands().keys()]);
+      print(warning(`No command /${name}.${near ? ` Did you mean /${near}?` : " Type /help for commands."}`));
+    }
   } else if (command === "/clear") {
     await stopForNewConversation();
     const following = newConversation();
@@ -888,7 +915,8 @@ async function runCommand(line) {
   } else if (command === "/model") {
     showModel();
   } else {
-    print(warning(`Unknown command ${command}. Type /help for commands.`));
+    const near = nearCommand(command.slice(1), [...COMMANDS.map((name) => name.slice(1)), ...customCommands().keys()]);
+    print(warning(`Unknown command ${command}.${near ? ` Did you mean /${near}?` : " Type /help for commands."}`));
   }
   // /undo, /compact and /stop tell the model something; keep that in the saved conversation.
   if (["/undo", "/compact", "/stop"].includes(command)) saveConversation();
@@ -953,11 +981,14 @@ function readPipedInput({ hasTask }) {
 // --print: runs one task and writes the model's reply to stdout. Resolves to the exit code: 0
 // when the task ran, 1 when it failed, 2 without a task, 130 when cancelled with Ctrl+C.
 async function runPrint() {
-  const task = [firstTask, await readPipedInput({ hasTask: Boolean(firstTask) })].filter(Boolean).join("\n\n");
-  if (!task) {
+  const entered = [firstTask, await readPipedInput({ hasTask: Boolean(firstTask) })].filter(Boolean).join("\n\n");
+  if (!entered) {
     print(failure("--print needs a task: give it as an argument, or pipe it in."));
     return 2;
   }
+  // One of the user's own commands runs its prompt, with what was piped in as its arguments.
+  const own = findCommand(entered, customCommands());
+  const task = own ? commandTask(own.command, own.args) : entered;
 
   const controller = new AbortController();
   // Ctrl+C cancels the task, stopping the request or command it is waiting on; twice quits.
@@ -1004,7 +1035,7 @@ async function runPrint() {
     print(info(`Changed ${nameList(changes.paths)}`));
   }
   showFooter(usage, startedAt);
-  saveConversation(task);
+  saveConversation(entered);
   await backgroundProcesses.stopAll();
   return exitCode;
 }
@@ -1013,6 +1044,41 @@ async function runPrint() {
 function prompt() {
   const mark = theme.accent(theme.strong(glyphs.prompt));
   return planMode ? `${theme.plan("plan")} ${mark} ` : `${mark} `;
+}
+
+// Where a command's file is, as the user knows it.
+function commandFile(command) {
+  return `${command.scope === "user" ? `~/${USER_DIR}` : USER_DIR}/commands/${basename(command.file)}`;
+}
+
+// Runs what the user entered: a command, one of their own commands, or a task. Resolves to
+// false when the CLI should quit.
+async function handleInput(line) {
+  // "/help" is a command; "/src/app.js is broken" is a task.
+  if (!/^\/[a-z0-9][\w-]*(\s|$)/i.test(line)) {
+    print();
+    await runTask(line);
+    print();
+    return true;
+  }
+
+  const own = findCommand(line, customCommands());
+  if (own) {
+    print();
+    print(info(`${glyphs.arrow} /${own.command.name}, from ${commandFile(own.command)}`));
+    await runTask(commandTask(own.command, own.args), { title: line });
+    print();
+    return true;
+  }
+
+  let going = true;
+  try {
+    going = await runCommand(line.split("\n")[0]);
+  } catch (error) {
+    print(failure(error.message));
+  }
+  print();
+  return going;
 }
 
 async function runInteractive() {
@@ -1025,33 +1091,17 @@ async function runInteractive() {
   if (continued) showResumed(continued);
   print();
 
+  let going = true;
   if (firstTask) {
     print(`${prompt()}${firstTask}`);
-    print();
-    await runTask(firstTask);
-    print();
+    going = await handleInput(firstTask);
   }
 
-  while (true) {
+  while (going) {
     const text = await userInput.next(prompt());
     if (text == null) break;
     const line = text.trim();
-    if (!line) continue;
-
-    // "/help" is a command; "/src/app.js is broken" is a task.
-    if (/^\/[a-z]+(\s|$)/i.test(line)) {
-      try {
-        if (!(await runCommand(line.split("\n")[0]))) break;
-      } catch (error) {
-        print(failure(error.message));
-      }
-      print();
-      continue;
-    }
-
-    print();
-    await runTask(line);
-    print();
+    if (line) going = await handleInput(line);
   }
 
   const stopped = await backgroundProcesses.stopAll();

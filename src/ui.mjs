@@ -203,7 +203,7 @@ export function banner({ version, model, project, following = [], sandbox = fals
 }
 
 const COMMANDS = [
-  ["/help", "", "Show this help"],
+  ["/help", "[name]", "Show this help, or one of your commands in full"],
   ["/clear", "", "Start a new conversation"],
   ["/resume", "[n]", "List the saved conversations, or continue conversation n"],
   ["/compact", "", "Summarize the conversation so far, to free up the model's context"],
@@ -217,13 +217,14 @@ const COMMANDS = [
 ];
 
 const KEYS = [
-  ["Ctrl+C", "Cancel the task the agent is working on; at the prompt, quit"],
+  ["Ctrl+C", "Cancel the task the agent is working on; at the prompt, clear what you typed, or quit"],
   ["Tab", "Complete commands, model names and file paths"],
   ["Up, Down", "Bring back what you entered before in this project"],
 ];
 
 const TIPS = [
-  "Messages you enter while the agent works run after the task. Pasted lines are sent together as one message.",
+  "Messages you enter while the agent works run after the task. Pasted lines are sent together as one message. To type a message of several lines, end each line but the last with \\.",
+  "Add your own commands: a prompt in .phi-agent/commands/<name>.md, in the project or in your home folder, runs with /<name>. $ARGUMENTS in it stands for what you write after the command.",
   "To show the model an image, put its path in your message (drag the file into the terminal), or @ and a project path, like @docs/mockup.png.",
   'At a confirmation, answer y (yes), n (no), or a (always): from then on, in this project, commands that start the same way run without asking, and so do pages from the same site, or the same file tool. Commands that chain others, and ones like rm, always ask.',
 ];
@@ -244,15 +245,26 @@ function wrap(text, width) {
   return lines;
 }
 
-/** The /help text, as lines. */
-export function helpLines(columns, g = defaultGlyphs) {
+/** The /help text, as lines, with the user's own commands (see commands.mjs), if any, and the
+ *  command files that were skipped, each with why. */
+export function helpLines(columns, g = defaultGlyphs, custom = [], skipped = []) {
   const width = Math.min(lineWidth(columns), 100);
-  const nameWidth = Math.max(...COMMANDS.map(([name, args]) => displayWidth(`${name} ${args}`.trim())), ...KEYS.map(([key]) => key.length));
+  const nameWidth = Math.max(
+    ...COMMANDS.map(([name, args]) => displayWidth(`${name} ${args}`.trim())),
+    ...custom.map(({ name }) => Math.min(24, displayWidth(`/${name}`))),
+    ...KEYS.map(([key]) => key.length),
+  );
   const entry = (name, description) => {
     // The description wraps in its own column.
-    const [first, ...rest] = wrap(description, Math.max(20, width - nameWidth - 4));
+    const [first = "", ...rest] = wrap(description, Math.max(20, width - nameWidth - 4));
     return [`${INDENT}${padEnd(name, nameWidth)}  ${first}`, ...rest.map((line) => `${INDENT}${" ".repeat(nameWidth)}  ${line}`)];
   };
+  const own = custom.length
+    ? [theme.strong("Your commands"), ...[...custom].sort((a, b) => (a.name < b.name ? -1 : 1)).flatMap(({ name, description }) => entry(theme.accent(`/${name}`), description)), ""]
+    : [];
+  const notUsed = skipped.length
+    ? [theme.muted("Not used:"), ...skipped.map(({ file, reason }) => `${INDENT}${theme.muted(`${file} — ${reason}`)}`), ""]
+    : [];
   return [
     theme.strong("Commands"),
     ...COMMANDS.flatMap(([name, args, description]) => {
@@ -260,6 +272,8 @@ export function helpLines(columns, g = defaultGlyphs) {
       return entry(shown, description);
     }),
     "",
+    ...own,
+    ...notUsed,
     theme.strong("Keys"),
     ...KEYS.flatMap(([key, description]) => entry(theme.accent(key), description)),
     "",
@@ -269,6 +283,11 @@ export function helpLines(columns, g = defaultGlyphs) {
       return [`${INDENT}${theme.muted(g.bullet)} ${first}`, ...rest.map((line) => `${INDENT}  ${line}`)];
     }),
   ];
+}
+
+/** The /help <name> text, as lines: one of the user's own commands (see commands.mjs) in full. */
+export function commandLines({ name, description, prompt }, file) {
+  return [theme.accent(`/${name}`) + (description ? `  ${theme.muted(description)}` : ""), theme.muted(`from ${file}`), "", ...prompt.split("\n")];
 }
 
 /** A line of markdown as plain text, for a preview: "## **Fixed** `add`" is "Fixed add". */

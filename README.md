@@ -115,7 +115,7 @@ With an `anthropic/` model on OpenRouter, the agent marks the prompt for caching
 
 | Input | Effect |
 | --- | --- |
-| `/help` | Show the commands |
+| `/help [name]` | Show the commands, and your own; with a name, one of your commands in full |
 | `/clear` | Start a new conversation |
 | `/resume [n]` | List the saved conversations, or continue conversation n |
 | `/compact` | Summarize the conversation so far, to free up the model's context |
@@ -127,14 +127,24 @@ With an `anthropic/` model on OpenRouter, the agent marks the prompt for caching
 | `/permissions` | List what runs without asking; `/permissions remove <n>` takes one back |
 | `/exit`, `/quit` | Quit |
 | Ctrl+C while the agent works | Cancel the current task and return to the prompt |
-| Ctrl+C or Ctrl+D at the prompt | Quit |
+| Ctrl+C at the prompt | Clear what you typed; with nothing typed, quit (Ctrl+D quits too) |
 | `y`, `n` or `a` when asked to confirm (`? Run this command? y/N …`) | Run the tool call, skip it, or run it and allow calls like it for good in this project (see [Permissions](#permissions)) |
+
+### Your own commands
+
+A Markdown file `.phi-agent/commands/<name>.md` in the project (which git can share) or in `~/.phi-agent/commands` (for all your projects) is a command you run with `/<name>`, like `/review src/app.js`. Where both have one of the same name, the project's wins. A file can start with a one-line description, which `/help` shows:
+
+    ---
+    description: Review the changes for bugs
+    ---
+
+`$ARGUMENTS` in the prompt stands for what you write after the command; without it, what follows goes after the prompt. With `--print`, a piped-in message can start with one of your commands too. A command name that doesn't exist suggests the closest one, yours or a built-in. A `.md` file that can't be a command — a built-in's name, an invalid name, no prompt in it, or shadowed by the project's file of the same name — is skipped, and `/help` says which, and why.
 
 A cancelled task keeps the conversation usable: any tool calls it had started are recorded as cancelled, and you can carry on with a new task. Cancelling also stops a running `shell` command and any processes it started.
 
-You can type while the agent works: a message you enter then runs after the current task, unless you cancel the task with Ctrl+C. Pasting several lines sends them as one message, so a pasted error message is one task, not one per line.
+You can type while the agent works: a message you enter then runs after the current task, unless you cancel the task with Ctrl+C. Pasting several lines sends them as one message, so a pasted error message is one task, not one per line. To type a message of several lines, end each line but the last with `\`; it goes on after a `…` prompt.
 
-Tab completes commands, model IDs after `/model`, and file paths. The up arrow brings back what you entered before, in this project too, as it is saved in `.agent/history`.
+Tab completes commands, model IDs after `/model`, and file paths. The up arrow brings back what you entered before, in this project too, as it is saved in `.agent/history`. Answers to confirmation questions, and the lines of a message of several, stay out of it.
 
 When the agent needs you after working a while, at a confirmation after 10 seconds or at the end of a task that took 30, it rings the terminal's bell, which can flash the window or mark its tab. `BELL=off` in `.env` silences it.
 

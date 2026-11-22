@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PassThrough } from "node:stream";
+import { stripVTControlCharacters as plain } from "node:util";
 import { createInput } from "./input.mjs";
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -56,6 +57,19 @@ describe("createInput in a terminal", () => {
     reader.close();
   });
 
+  it("joins lines ended with \\ into one input, also while busy", async () => {
+    const { input, reader, queued } = setup({ terminal: true });
+
+    // Nothing asks for input while the agent works: the lines still queue as one.
+    input.write("first \\\r");
+    await wait(40);
+    input.write("second\r");
+    await wait(40);
+    expect(queued).toEqual(["first \nsecond"]);
+    expect(await reader.next(": ")).toBe("first \nsecond");
+    reader.close();
+  });
+
   it("answers a confirmation with a new line, not one entered earlier", async () => {
     const { input, reader } = setup({ terminal: true });
     input.write("later task\r");
@@ -103,6 +117,51 @@ describe("createInput in a terminal", () => {
     input.write("Error: boom\r  at app.js:1\r");
     expect(await pasted).toBe("Error: boom\n  at app.js:1");
     expect(saved.at(-1)).toEqual(["run the tests", "older task"]);
+    reader.close();
+  });
+
+  it("goes on to the next line after a line typed with \\ at its end", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let shown = "";
+    output.setEncoding("utf8").on("data", (text) => (shown += text));
+    const saved = [];
+    const reader = createInput({ input, output, terminal: true, pasteWindowMs: 20, continuationPrompt: "… ", onHistory: (lines) => saved.push([...lines]) });
+
+    // Typed lines, each entered on its own.
+    const next = reader.next(": ");
+    input.write("fix the parser \\\r");
+    await wait(40);
+    expect(plain(shown)).toMatch(/… $/); // the next line's prompt
+    input.write("\\\r");
+    await wait(40);
+    input.write("and its tests\r");
+    expect(await next).toBe("fix the parser \n\nand its tests");
+    // None of its lines go into the history.
+    expect(saved.at(-1) ?? []).toEqual([]);
+
+    // A pasted line ending with \ stays as it is.
+    const pasted = reader.next(": ");
+    input.write("cd C:\\work\\\rdir\r");
+    expect(await pasted).toBe("cd C:\\work\\\ndir");
+    reader.close();
+  });
+
+  it("throws away what was typed at the prompt, when asked to", async () => {
+    const { input, reader, shown } = setup({ terminal: true });
+    expect(reader.discardDraft()).toBe(false); // nothing typed
+
+    const next = reader.next(": ");
+    input.write("first line \\\r");
+    await wait(40);
+    input.write("half");
+    await wait(0);
+    expect(reader.discardDraft()).toBe(true);
+    expect(reader.typing).toBe(false);
+    expect(plain(shown())).toMatch(/: $/); // the prompt again
+
+    input.write("something else\r");
+    expect(await next).toBe("something else");
     reader.close();
   });
 

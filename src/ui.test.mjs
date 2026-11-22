@@ -3,6 +3,7 @@ import { stripVTControlCharacters as plain } from "node:util";
 import { LEGACY_GLYPHS, UNICODE_GLYPHS, displayWidth } from "./theme.mjs";
 import {
   banner,
+  commandLines,
   confirmPrompt,
   detailLines,
   formatDuration,
@@ -150,6 +151,39 @@ describe("helpLines", () => {
     expect(shown.some((line) => /^ {2}Ctrl\+C +Cancel the task/.test(line))).toBe(true);
     expect(shown).toContain("Tips");
     for (const line of shown) expect(displayWidth(line)).toBeLessThanOrEqual(59);
+    expect(shown).not.toContain("Your commands");
+  });
+
+  it("lists the user's own commands, by name", () => {
+    const custom = [
+      { name: "review", description: "Review the changes for bugs" },
+      { name: "explain", description: "" },
+    ];
+    const shown = lines(helpLines(80, g, custom));
+    const at = shown.indexOf("Your commands");
+    expect(shown.slice(at, at + 3)).toEqual(["Your commands", `  ${"/explain".padEnd(13)}  `, `  ${"/review".padEnd(13)}  Review the changes for bugs`]);
+    expect(shown.indexOf("Commands")).toBeLessThan(at);
+    expect(shown.indexOf("Keys")).toBeGreaterThan(at);
+  });
+
+  it("notes the command files that were skipped, and why", () => {
+    const shown = lines(helpLines(80, g, [{ name: "review", description: "Review the changes" }], [{ file: ".phi-agent/commands/help.md", reason: "/help is a built-in command" }]));
+    const at = shown.indexOf("Not used:");
+    expect(at).toBeGreaterThan(shown.indexOf("Your commands"));
+    expect(shown[at + 1]).toBe("  .phi-agent/commands/help.md — /help is a built-in command");
+    expect(shown.indexOf("Keys")).toBeGreaterThan(at);
+  });
+});
+
+describe("commandLines", () => {
+  it("shows one of the user's own commands in full: description, file, and prompt", () => {
+    const shown = lines(commandLines({ name: "review", description: "Review the changes", prompt: "Review the uncommitted changes.\nLook at git diff." }, ".phi-agent/commands/review.md"));
+    expect(shown).toEqual(["/review  Review the changes", "from .phi-agent/commands/review.md", "", "Review the uncommitted changes.", "Look at git diff."]);
+  });
+
+  it("leaves out the description and file line's extras when there are none", () => {
+    const shown = lines(commandLines({ name: "explain", description: "", prompt: "Explain $ARGUMENTS" }, "~/.phi-agent/commands/explain.md"));
+    expect(shown).toEqual(["/explain", "from ~/.phi-agent/commands/explain.md", "", "Explain $ARGUMENTS"]);
   });
 });
 

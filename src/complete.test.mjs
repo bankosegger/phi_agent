@@ -20,6 +20,8 @@ describe("completeLine", () => {
     expect(completeLine("/c", { commands: COMMANDS })).toEqual([["/clear", "/compact"], "/c"]);
     expect(completeLine("/", { commands: COMMANDS })).toEqual([COMMANDS, "/"]);
     expect(completeLine("/x", { commands: COMMANDS })).toEqual([[], "/x"]);
+    // The user's own commands can have digits, dashes and underscores in their names.
+    expect(completeLine("/fix-", { commands: [...COMMANDS, "/fix-tests", "/fix_lint"] })).toEqual([["/fix-tests"], "/fix-"]);
   });
 
   it("completes model IDs after /model", () => {

@@ -14,6 +14,7 @@ export function supportsUnicode(env = process.env, platform = process.platform) 
 
 export const UNICODE_GLYPHS = {
   prompt: "❯",
+  continued: "…",
   tool: "●",
   ok: "✓",
   fail: "✗",
@@ -34,6 +35,7 @@ export const UNICODE_GLYPHS = {
 export const LEGACY_GLYPHS = {
   ...UNICODE_GLYPHS,
   prompt: ">",
+  continued: ".",
   ok: "√",
   fail: "×",
   gap: ":",

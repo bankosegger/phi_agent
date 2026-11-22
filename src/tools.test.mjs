@@ -7,6 +7,28 @@ import { chdir, cwd } from "node:process";
 import { commandEnv } from "./processes.mjs";
 import { checkToolCall, globToRegExp, needsConfirmation, runTool, safeProjectPath, shellTimeout, toolsFor } from "./tools.mjs";
 
+// Whether process `pid` has ended, waiting up to 3 seconds for it. A killed process whose parent
+// was killed too is a zombie until the system reaps it, which kill(pid, 0) still finds; on
+// Linux, /proc says when a process is one.
+async function ended(pid) {
+  for (let i = 0; i < 60; i++) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    if (process.platform === "linux") {
+      try {
+        if (readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").at(-1).startsWith("Z")) return true;
+      } catch {
+        return true; // gone meanwhile
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
 async function inTempDir(fn) {
   const originalCwd = cwd();
   const dir = mkdtempSync(join(tmpdir(), "tiny-agent-"));
@@ -247,7 +269,7 @@ describe("runTool", () => {
       controller.abort();
 
       expect(await running).toContain("[cancelled by user]");
-      expect(() => process.kill(pid, 0)).toThrow(); // the grandchild is gone too
+      expect(await ended(pid)).toBe(true); // the grandchild is gone too
     } finally {
       chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });

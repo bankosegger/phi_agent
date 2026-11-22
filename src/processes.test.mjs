@@ -33,6 +33,28 @@ async function waitFor(check) {
   for (let i = 0; i < 100 && !check(); i++) await sleep(50);
 }
 
+// Whether process `pid` has ended, waiting up to 3 seconds for it. A killed process whose parent
+// was killed too is a zombie until the system reaps it, which kill(pid, 0) still finds; on
+// Linux, /proc says when a process is one.
+async function ended(pid) {
+  for (let i = 0; i < 60; i++) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    if (process.platform === "linux") {
+      try {
+        if (readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").at(-1).startsWith("Z")) return true;
+      } catch {
+        return true; // gone meanwhile
+      }
+    }
+    await sleep(50);
+  }
+  return false;
+}
+
 afterEach(async () => {
   await backgroundProcesses.stopAll();
 });
@@ -80,7 +102,7 @@ describe("background processes", () => {
       const pid = Number(readFileSync("pid.txt", "utf8"));
 
       expect(await runTool("stop_process", { id })).toBe(`(no new output)\n[process ${id} was stopped]`);
-      expect(() => process.kill(pid, 0)).toThrow(); // the grandchild is gone too
+      expect(await ended(pid)).toBe(true); // the grandchild is gone too
       expect(backgroundProcesses.running).toHaveLength(0);
     });
   });

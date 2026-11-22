@@ -10,6 +10,11 @@ const TRIM_TO = 0.5; // trimming down to this share, so it happens rarely and ca
 const KEEP_CHARS = 300; // tool output and arguments this short are always kept
 const DEFAULT_CHARS_PER_TOKEN = 3; // until a reply says how many tokens a request took
 const TOOLS_CHARS = JSON.stringify(tools).length;
+// An image costs the model about as much as this many characters of text (around 1,500
+// tokens), however many bytes it has.
+const IMAGE_CHARS = 5000;
+const IMAGE_STAND_IN = "x".repeat(IMAGE_CHARS);
+const IMAGE_REMOVED = "[image removed to save context space; look at it again if you need it]";
 
 // Error messages that mean a request was too long, and where they state the model's window.
 const OVERFLOW = /context length|context window|too many tokens|prompt is too long|too large for (the )?model|exceeds the maximum number of tokens/i;
@@ -25,9 +30,14 @@ export function isOverflowError(error) {
   return OVERFLOW.test(String(error?.message ?? ""));
 }
 
+// The length of a message (or messages) as JSON, counting each image as IMAGE_CHARS.
+function size(value) {
+  return JSON.stringify(value, (key, part) => (key === "url" && typeof part === "string" && part.startsWith("data:") ? IMAGE_STAND_IN : part)).length;
+}
+
 // Characters in a request: the messages as JSON, plus the tool definitions sent with them.
 function requestChars(messages) {
-  return JSON.stringify(messages).length + TOOLS_CHARS;
+  return size(messages) + TOOLS_CHARS;
 }
 
 function shrinkArguments(json) {
@@ -47,16 +57,18 @@ function shrinkArguments(json) {
   return JSON.stringify(args);
 }
 
-// Replaces a long tool result, or the long arguments of tool calls (like the content of a file
-// the model wrote), with a short note. Returns how many characters that saved.
+// Replaces a long tool result, the long arguments of tool calls (like the content of a file the
+// model wrote), or images, with a short note. Returns how many characters that saved.
 function shrink(message) {
-  const before = JSON.stringify(message).length;
+  const before = size(message);
   if (message.role === "tool" && typeof message.content === "string" && message.content.length > KEEP_CHARS) {
     message.content = `[${message.content.length} characters of old tool output removed to save context space; run the tool again if you need it]`;
   } else if (message.role === "assistant" && message.tool_calls) {
     for (const call of message.tool_calls) call.function.arguments = shrinkArguments(call.function.arguments);
+  } else if (Array.isArray(message.content)) {
+    message.content = message.content.map((part) => (part.type === "image_url" ? { type: "text", text: IMAGE_REMOVED } : part));
   }
-  return before - JSON.stringify(message).length;
+  return before - size(message);
 }
 
 export class ContextWindow {
@@ -129,16 +141,27 @@ export class ContextWindow {
   }
 }
 
-/** The context window of each model OpenRouter lists, in tokens, as a Map from model ID. */
-export async function fetchContextLengths(openai) {
-  const lengths = new Map();
+/**
+ * What OpenRouter says about each model it lists, as a Map from model ID to { contextLength (in
+ * tokens, or null), images (whether it can see them), tools (whether it can call tools) }.
+ * images and tools are null when the list doesn't say.
+ */
+export async function fetchModels(openai) {
+  const models = new Map();
   for await (const model of openai.models.list()) {
-    if (model.id && model.context_length > 0) lengths.set(model.id, model.context_length);
+    if (!model.id) continue;
+    const inputs = model.architecture?.input_modalities;
+    const parameters = model.supported_parameters;
+    models.set(model.id, {
+      contextLength: model.context_length > 0 ? model.context_length : null,
+      images: Array.isArray(inputs) ? inputs.includes("image") : null,
+      tools: Array.isArray(parameters) ? parameters.includes("tools") : null,
+    });
   }
-  return lengths;
+  return models;
 }
 
-/** A model's window from fetchContextLengths, or null. Variants like :free share their model's. */
-export function contextLengthOf(lengths, model) {
-  return lengths?.get(model) ?? lengths?.get(model.replace(/:[^/:]*$/, "")) ?? null;
+/** A model's entry from fetchModels, or null. Variants like :free are their model's. */
+export function modelInfo(models, model) {
+  return models?.get(model) ?? models?.get(model.replace(/:[^/:]*$/, "")) ?? null;
 }

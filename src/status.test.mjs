@@ -81,6 +81,24 @@ describe("createStatus", () => {
     status.stop();
   });
 
+  it("adds a hint once a wait goes on, if there is room for it", () => {
+    const terminal = fakeTerminal({ columns: 60 });
+    let clock = 0;
+    const status = createStatus({ output: terminal, now: () => clock, frames: ["a"], hint: "Ctrl+C to cancel", hintAfter: 3000 });
+    status.set("Thinking");
+    vi.advanceTimersByTime(100);
+    expect(shown(terminal)).toBe("a Thinking");
+
+    clock = 3000;
+    vi.advanceTimersByTime(100);
+    expect(shown(terminal)).toBe("a Thinking · 3s · Ctrl+C to cancel");
+
+    terminal.columns = 25;
+    vi.advanceTimersByTime(100);
+    expect(shown(terminal)).toBe("a Thinking · 3s");
+    status.stop();
+  });
+
   it("shows nothing outside a terminal", () => {
     const terminal = fakeTerminal({ isTTY: false });
     const status = createStatus({ output: terminal });

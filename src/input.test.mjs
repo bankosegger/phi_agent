@@ -78,6 +78,51 @@ describe("createInput in a terminal", () => {
     reader.close();
   });
 
+  it("remembers what was entered, but not answers to questions", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.resume();
+    const saved = [];
+    const reader = createInput({ input, output, terminal: true, pasteWindowMs: 20, history: ["older task"], onHistory: (lines) => saved.push([...lines]) });
+
+    const next = reader.next(": ");
+    input.write("run the tests\r");
+    expect(await next).toBe("run the tests");
+    const answer = reader.ask("[confirm] ");
+    input.write("y\r");
+    expect(await answer).toBe("y");
+
+    expect(saved.at(-1)).toEqual(["run the tests", "older task"]);
+    // The up arrow brings back the last task, not the answer.
+    const again = reader.next(": ");
+    input.write("\x1b[A\r");
+    expect(await again).toBe("run the tests");
+
+    // A paste is one input, and none of its lines go into the history.
+    const pasted = reader.next(": ");
+    input.write("Error: boom\r  at app.js:1\r");
+    expect(await pasted).toBe("Error: boom\n  at app.js:1");
+    expect(saved.at(-1)).toEqual(["run the tests", "older task"]);
+    reader.close();
+  });
+
+  it("completes the line on Tab", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.resume();
+    const reader = createInput({ input, output, terminal: true, pasteWindowMs: 20, completer: (line) => [["/compact"], line] });
+
+    // Keys one at a time, as typed: in one piece, they would read as a paste.
+    const next = reader.next(": ");
+    input.write("/comp");
+    await wait(30);
+    input.write("\t");
+    await wait(30);
+    input.write("\r");
+    expect(await next).toBe("/compact");
+    reader.close();
+  });
+
   it("says when the user is typing, and runs a handler before each key is shown", async () => {
     const { input, reader, shown } = setup({ terminal: true });
     const keys = [];

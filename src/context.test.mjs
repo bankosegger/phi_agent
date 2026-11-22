@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ContextWindow, contextLengthOf, fetchContextLengths, isOverflowError } from "./context.mjs";
+import { ContextWindow, fetchModels, isOverflowError, modelInfo } from "./context.mjs";
 
 const system = { role: "system", content: "You are a coding agent." };
 
@@ -65,6 +65,35 @@ describe("ContextWindow", () => {
     expect(messages[6].content).toMatch(REMOVED_OUTPUT);
   });
 
+  it("counts an image as a fixed size, and removes old images when trimming", () => {
+    const context = new ContextWindow({ limit: 10_000 });
+    const image = (bytes) => ({ type: "image_url", image_url: { url: `data:image/png;base64,${"A".repeat(bytes)}` } });
+    const messages = [
+      system,
+      { role: "user", content: [{ type: "text", text: "what is wrong here?" }, image(3_000_000)] },
+      { role: "assistant", content: "The button overlaps the title." },
+      { role: "user", content: [{ type: "text", text: "and here?" }, image(10), image(10)] },
+    ];
+    // A 3 MB image counts the same as a tiny one: about 5000 characters.
+    const estimate = context.estimate(messages);
+    const withTinyImages = structuredClone(messages);
+    withTinyImages[1].content[1] = image(10);
+    expect(context.estimate(withTinyImages)).toBe(estimate);
+    withTinyImages[1].content.pop();
+    const perImage = estimate - context.estimate(withTinyImages); // in tokens, at 3 characters each
+    expect(perImage).toBeGreaterThanOrEqual(5000 / 3);
+    expect(perImage).toBeLessThan(5100 / 3);
+
+    context.limit = 6000;
+    expect(context.trim(messages)).toBe(1);
+    expect(messages[1].content).toEqual([
+      { type: "text", text: "what is wrong here?" },
+      { type: "text", text: "[image removed to save context space; look at it again if you need it]" },
+    ]);
+    // The newest images, which the model hasn't seen yet, stay.
+    expect(messages[3].content.filter((part) => part.type === "image_url")).toHaveLength(2);
+  });
+
   it("stops trimming once there is room, keeping later output", () => {
     const context = new ContextWindow({ limit: 10_000 });
     const messages = [
@@ -125,27 +154,33 @@ describe("ContextWindow", () => {
   });
 });
 
-describe("fetchContextLengths", () => {
-  it("reads each model's context window from the model list", async () => {
+describe("fetchModels", () => {
+  it("reads each model's context window, and whether it sees images and calls tools", async () => {
     const openai = {
       models: {
         async *list() {
-          yield { id: "openai/gpt-4o-mini", context_length: 128_000 };
-          yield { id: "vendor/small:free", context_length: 8192 };
+          yield {
+            id: "openai/gpt-4o-mini",
+            context_length: 128_000,
+            architecture: { input_modalities: ["text", "image"] },
+            supported_parameters: ["tools", "tool_choice"],
+          };
+          yield { id: "vendor/small:free", context_length: 8192, architecture: { input_modalities: ["text"] }, supported_parameters: ["temperature"] };
           yield { id: "vendor/unknown" };
         },
       },
     };
-    const lengths = await fetchContextLengths(openai);
+    const models = await fetchModels(openai);
 
-    expect([...lengths]).toEqual([
-      ["openai/gpt-4o-mini", 128_000],
-      ["vendor/small:free", 8192],
+    expect([...models]).toEqual([
+      ["openai/gpt-4o-mini", { contextLength: 128_000, images: true, tools: true }],
+      ["vendor/small:free", { contextLength: 8192, images: false, tools: false }],
+      ["vendor/unknown", { contextLength: null, images: null, tools: null }],
     ]);
-    expect(contextLengthOf(lengths, "openai/gpt-4o-mini")).toBe(128_000);
-    expect(contextLengthOf(lengths, "openai/gpt-4o-mini:nitro")).toBe(128_000);
-    expect(contextLengthOf(lengths, "vendor/small:free")).toBe(8192);
-    expect(contextLengthOf(lengths, "vendor/typo")).toBe(null);
-    expect(contextLengthOf(null, "openai/gpt-4o-mini")).toBe(null);
+    expect(modelInfo(models, "openai/gpt-4o-mini").contextLength).toBe(128_000);
+    expect(modelInfo(models, "openai/gpt-4o-mini:nitro").contextLength).toBe(128_000);
+    expect(modelInfo(models, "vendor/small:free").images).toBe(false);
+    expect(modelInfo(models, "vendor/typo")).toBe(null);
+    expect(modelInfo(null, "openai/gpt-4o-mini")).toBe(null);
   });
 });

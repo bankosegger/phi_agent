@@ -1,10 +1,28 @@
-import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  appendFileSync,
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  rmdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { imagePart } from "./images.mjs";
+import { backgroundProcesses, killProcessTree, spawnShell } from "./processes.mjs";
+import { fetchUrl, webUrl } from "./web.mjs";
 
 const ASSET_DIR = ".agent/assets";
 const SHELL_TIMEOUT_DEFAULT = 120; // seconds
 const SHELL_TIMEOUT_MAX = 600;
+const BACKGROUND_START_WAIT = 3; // seconds to wait for a background command's first output
+const MAX_OUTPUT_WAIT = 60;
 const GIT_TIMEOUT_MS = 30_000;
 const MAX_TOOL_OUTPUT = 10_000;
 const MAX_SHELL_CAPTURE = 10 * 1024 * 1024;
@@ -13,6 +31,9 @@ const MAX_FOUND_FILES = 200;
 const MAX_GREP_MATCHES = 100;
 const MAX_GREP_FILE_BYTES = 1024 * 1024;
 const MAX_IGNORED_NAMES = 5;
+// delete_file and move_file keep what they change in memory, for /undo.
+const MAX_TRACKED_FILES = 1000;
+const MAX_TRACKED_MB = 50;
 const SKIPPED_DIRS = new Set(["node_modules", ".git", ".agent"]);
 const GIT_COMMANDS = ["status", "diff", "log"];
 const GIT_LOG_DEFAULT = 20;
@@ -34,8 +55,45 @@ export const tools = [
             type: "integer",
             description: `Seconds to wait before stopping the command, up to ${SHELL_TIMEOUT_MAX}. Defaults to ${SHELL_TIMEOUT_DEFAULT}; raise it for slow installs, builds or test runs.`,
           },
+          background: {
+            type: "boolean",
+            description:
+              "Keep the command running in the background, for a server or a watcher that doesn't exit. Returns its first output after a few seconds; read more with process_output, and stop it with stop_process once you no longer need it.",
+          },
         },
         required: ["cmd"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "process_output",
+      description: "Read what a background process printed since you last read it, and whether it is still running.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "integer", description: "The process number that shell gave when it started it" },
+          wait: {
+            type: "integer",
+            description: `Seconds to wait for new output, or for the process to end, up to ${MAX_OUTPUT_WAIT}. Defaults to 0.`,
+          },
+        },
+        required: ["id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "stop_process",
+      description: "Stop a background process, and any processes it started. Returns its last output.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "integer" },
+        },
+        required: ["id"],
       },
     },
   },
@@ -69,6 +127,20 @@ export const tools = [
           path: { type: "string" },
           start_line: { type: "integer" },
           end_line: { type: "integer" },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "view_image",
+      description: "Look at an image file in the project, like a screenshot, a diagram or a design: PNG, JPEG, GIF or WebP, up to 5 MB.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
         },
         required: ["path"],
       },
@@ -126,6 +198,22 @@ export const tools = [
   {
     type: "function",
     function: {
+      name: "fetch_url",
+      description:
+        "Fetch a web page, or other text, over http or https: documentation, an issue, an API response, or a server you started. HTML comes back as readable text with its links. Long pages come in parts that say where to continue.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string" },
+          start: { type: "integer", description: "The character to start from, to read the next part of a long page" },
+        },
+        required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "edit_file",
       description:
         "Replace one exact occurrence of old_string with new_string in a file. Fails if old_string is missing or appears more than once, so include enough context to make it unique.",
@@ -174,6 +262,36 @@ export const tools = [
   {
     type: "function",
     function: {
+      name: "delete_file",
+      description: "Delete a file, or a folder and everything in it. Folders it leaves empty are removed too. The user can undo it.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "move_file",
+      description:
+        "Move or rename a file or folder. Fails if the new path exists. Creates the folders the new path needs, and removes those the move leaves empty. The user can undo it.",
+      parameters: {
+        type: "object",
+        properties: {
+          from: { type: "string", description: "The file or folder to move" },
+          to: { type: "string", description: "Its new path, including the name, like lib/util.js" },
+        },
+        required: ["from", "to"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "write_asset",
       description:
         "Save generated output that isn't project source, like a report, a data export or an SVG, under .agent/assets/, which git ignores. Files are kept after the session; tell the user where you saved them.",
@@ -189,8 +307,13 @@ export const tools = [
   },
 ];
 
+/** The tools for a model: without view_image if it can't see images. */
+export function toolsFor({ images = true } = {}) {
+  return images ? tools : tools.filter((tool) => tool.function.name !== "view_image");
+}
+
 export function needsConfirmation(name) {
-  return ["shell", "write_file", "write_asset", "edit_file", "append_file"].includes(name);
+  return ["shell", "write_file", "write_asset", "edit_file", "append_file", "delete_file", "move_file", "fetch_url"].includes(name);
 }
 
 export function safeProjectPath(path) {
@@ -223,12 +346,13 @@ function safeAssetPath(path) {
 
 // Files the file tools may change: not inside .git, and at the project root only files that
 // exist already (like package.json), so new files go in folders instead of piling up there.
-function checkWritable(fullPath) {
+// A new folder at the root is fine.
+function checkWritable(fullPath, { folder = false } = {}) {
   const rel = relative(process.cwd(), fullPath);
   if (rel.split(/[\\/]/).some((part) => part.toLowerCase() === ".git")) {
     throw new Error("Files inside .git can't be changed.");
   }
-  if (dirname(rel) === "." && !existsSync(fullPath)) {
+  if (!folder && dirname(rel) === "." && !existsSync(fullPath)) {
     throw new Error("New files can't be created at the project root. Put them in a folder like src/, or save generated output with write_asset.");
   }
 }
@@ -274,43 +398,11 @@ export function shellTimeout(seconds) {
   return Math.min(Math.max(1, Math.round(Number(seconds)) || SHELL_TIMEOUT_DEFAULT), SHELL_TIMEOUT_MAX);
 }
 
-// Kills the command and anything it started; the shell alone may leave children running.
-function killProcessTree(child) {
-  try {
-    if (process.platform === "win32") {
-      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
-    } else {
-      process.kill(-child.pid, "SIGKILL");
-    }
-  } catch {
-    // Already exited.
-  }
-}
-
-// The environment for the model's commands: the agent's, without its API key, which commands
-// don't need and which would otherwise end up in the conversation if one printed it.
-export function commandEnv(env = process.env) {
-  const result = { ...env };
-  for (const name of Object.keys(result)) {
-    if (name.toUpperCase() === "OPENROUTER_API_KEY") delete result[name];
-  }
-  return result;
-}
-
 function runShell(cmd, { signal, timeoutMs }) {
   if (signal?.aborted) return formatResult({ stopped: "cancelled" });
 
   return new Promise((resolvePromise) => {
-    // stdin is closed so commands that wait for input fail fast instead of hanging.
-    // On POSIX the command gets its own process group so the whole group can be killed.
-    // (On Windows, detached would open a new console window; taskkill /T covers the tree.)
-    const child = spawn(cmd, {
-      shell: true,
-      env: commandEnv(),
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      detached: process.platform !== "win32",
-    });
+    const child = spawnShell(cmd);
     const output = { stdout: "", stderr: "" };
     let stopped = null;
     let settled = false;
@@ -347,6 +439,34 @@ function runShell(cmd, { signal, timeoutMs }) {
     child.on("error", (error) => finish({ error }));
     child.on("close", (status, exitSignal) => finish({ status, signal: exitSignal }));
   });
+}
+
+// "[process 2 is running]", or how it ended.
+function processStatus(proc) {
+  if (proc.running) return `[process ${proc.id} is running]`;
+  if (proc.stopped) return `[process ${proc.id} was stopped]`;
+  if (proc.exit.error) return `[process ${proc.id} couldn't start: ${proc.exit.error.message}]`;
+  return `[process ${proc.id} exited with ${proc.exit.code != null ? `code ${proc.exit.code}` : proc.exit.signal}]`;
+}
+
+// What a background process printed since the model last read it, and how it is doing.
+function processReport(proc) {
+  const { text, lost } = proc.read();
+  const parts = [];
+  if (lost) parts.push(`[${lost} characters of output were dropped before they could be read]`);
+  parts.push(text.trim() ? truncateMiddle(text.trimEnd()) : "(no new output)");
+  parts.push(processStatus(proc));
+  return parts.join("\n");
+}
+
+// Starts a command that keeps running, like a dev server, and returns its first output. If the
+// task is cancelled meanwhile, the command is stopped again.
+async function startInBackground(cmd, signal) {
+  if (signal?.aborted) return formatResult({ stopped: "cancelled" });
+  const proc = backgroundProcesses.start(cmd);
+  await backgroundProcesses.waitForOutput(proc, BACKGROUND_START_WAIT, signal);
+  if (signal?.aborted) await proc.stop();
+  return `Started process ${proc.id} in the background.\n${processReport(proc)}`;
 }
 
 function runGit({ command, path, staged, count }) {
@@ -394,7 +514,10 @@ function formatResult(result, timeoutMs) {
 
 function readFile({ path, start_line, end_line }) {
   const text = readFileSync(safeProjectPath(path), "utf8");
-  if (text.includes("\0")) throw new Error(`${path} looks like a binary file; read_file only reads text`);
+  if (text.includes("\0")) {
+    const hint = /\.(png|jpe?g|gif|webp)$/i.test(path) ? "; look at images with view_image" : "";
+    throw new Error(`${path} looks like a binary file; read_file only reads text${hint}`);
+  }
 
   const lines = text.replaceAll("\r\n", "\n").split("\n");
   if (lines.at(-1) === "") lines.pop(); // a trailing newline does not start another line
@@ -623,13 +746,25 @@ function grep({ pattern, path, glob, ignoreCase }) {
   return matches.join("\n") + suffix;
 }
 
-// Changes a file through write(), recording it in `changes` (if given) so it can be undone.
+/**
+ * Keeps the project's .agent folder (assets, saved conversations) out of git, the way
+ * .pytest_cache does, by giving it a .gitignore that ignores everything in it.
+ */
+export function ignoreAgentFolder() {
+  const ignoreFile = safeProjectPath(".agent/.gitignore");
+  if (existsSync(ignoreFile)) return;
+  mkdirSync(dirname(ignoreFile), { recursive: true });
+  writeFileSync(ignoreFile, "*\n");
+}
+
+// Changes files through write(), recording them in `changes` (if given) so they can be undone.
 function trackChange(changes, fullPath, write) {
   return changes ? changes.track(fullPath, write) : write();
 }
 
 function shellCommand(args) {
   if (!requireString(args, "cmd").trim()) throw new Error("cmd must not be empty");
+  if (args.background) backgroundProcesses.checkRoom();
   return args.cmd;
 }
 
@@ -667,12 +802,108 @@ function plannedAsset(args) {
   return { path: safeAssetPath(args.path), content };
 }
 
+/**
+ * Whether `fullPath` is a folder, and the files that deleting or moving it changes, all of which
+ * are kept in memory for /undo. Throws for what undo couldn't put back as it was: a link, a .git
+ * folder (another repository), or more than MAX_TRACKED_FILES files or MAX_TRACKED_MB.
+ */
+function filesToTrack(fullPath, shown, verb) {
+  const folder = lstatSync(fullPath).isDirectory();
+  const files = [];
+  let bytes = 0;
+  const visit = (path) => {
+    const stats = lstatSync(path);
+    if (stats.isDirectory()) {
+      for (const name of readdirSync(path).sort()) {
+        if (name.toLowerCase() === ".git") throw new Error(`${shown} contains a .git folder, which can't be changed`);
+        visit(join(path, name));
+      }
+      return;
+    }
+    if (stats.isSymbolicLink()) throw new Error(`${shownPath(path)} is a link; use shell to ${verb} links`);
+    if (!stats.isFile()) throw new Error(`${shownPath(path)} isn't a regular file; use shell to ${verb} it`);
+
+    files.push(path);
+    bytes += stats.size;
+    if (files.length > MAX_TRACKED_FILES || bytes > MAX_TRACKED_MB * 1024 * 1024) {
+      const size = folder ? `has more than ${MAX_TRACKED_FILES} files or ${MAX_TRACKED_MB} MB` : `is bigger than ${MAX_TRACKED_MB} MB`;
+      throw new Error(`${shown} ${size}, too much to keep for undo; use shell to ${verb} it`);
+    }
+  };
+  visit(fullPath);
+  return { folder, files };
+}
+
+// Whether two existing paths are the same file, as names that differ only in case are on
+// Windows and macOS.
+function sameFile(a, b) {
+  const [x, y] = [statSync(a, { bigint: true }), statSync(b, { bigint: true })];
+  return x.dev === y.dev && x.ino === y.ino;
+}
+
+// What delete_file would delete: the file or folder, whether it is a folder, and the files that
+// go with it. Throws if it can't be deleted.
+function plannedDelete(args) {
+  const path = safeProjectPath(requireString(args, "path"));
+  if (path === process.cwd()) throw new Error("The project folder itself can't be deleted");
+  if (!existsSync(path)) throw new Error(`${args.path} does not exist`);
+  checkWritable(path);
+  return { path, ...filesToTrack(path, args.path, "delete") };
+}
+
+// What move_file would move, and the files it changes: those it moves, at both their old and
+// new paths. Throws if the move can't be made.
+function plannedMove(args) {
+  const from = safeProjectPath(requireString(args, "from"));
+  const to = safeProjectPath(requireString(args, "to"));
+  if (from === process.cwd()) throw new Error("The project folder itself can't be moved");
+  if (!existsSync(from)) throw new Error(`${args.from} does not exist`);
+  checkWritable(from);
+  if (existsSync(to)) {
+    if (sameFile(from, to)) throw new Error(`${args.from} and ${args.to} are the same file; to change only the case of a name, use shell`);
+    const into = statSync(to).isDirectory() ? `; to move it into that folder, include the name: ${args.to.replace(/[\\/]+$/, "")}/${basename(from)}` : "";
+    throw new Error(`${args.to} already exists${into}`);
+  }
+
+  const { folder, files } = filesToTrack(from, args.from, "move");
+  if (folder && !relative(from, to).startsWith("..")) throw new Error(`${args.from} can't be moved into itself`);
+  checkWritable(to, { folder });
+  return { from, to, files: [...files, ...files.map((file) => join(to, relative(from, file)))] };
+}
+
+// Removes `dir` and the folders above it while they are empty, up to the project folder.
+function removeEmptyFolders(dir) {
+  const root = process.cwd();
+  while (dir !== root && !relative(root, dir).startsWith("..")) {
+    try {
+      rmdirSync(dir);
+    } catch {
+      return; // not empty
+    }
+    dir = dirname(dir);
+  }
+}
+
+function moveSync(from, to) {
+  try {
+    renameSync(from, to);
+  } catch (error) {
+    if (error.code !== "EXDEV") throw error;
+    // Another drive or mount, like node_modules in the Docker sandbox: copy, then delete.
+    cpSync(from, to, { recursive: true, errorOnExist: true, force: false });
+    rmSync(from, { recursive: true });
+  }
+}
+
 const CHECKS = {
   shell: shellCommand,
   edit_file: plannedEdit,
   write_file: plannedWrite,
   append_file: plannedWrite,
   write_asset: plannedAsset,
+  delete_file: plannedDelete,
+  move_file: plannedMove,
+  fetch_url: (args) => webUrl(args.url),
 };
 
 // Throws if a tool call that needs confirmation would fail anyway, like an edit whose
@@ -682,11 +913,28 @@ export function checkToolCall(name, args) {
   CHECKS[name]?.(args);
 }
 
-// Runs a tool and resolves to its text result. Aborting `signal` stops a running shell command.
-// File changes are recorded in `changes` (a FileChanges), if given, so they can be undone.
+// Runs a tool and resolves to its text result, or for view_image to { content, parts }: the
+// text result, and the message parts that show the image. Aborting `signal` stops a running
+// shell command. File changes are recorded in `changes` (a FileChanges), if given, so they can
+// be undone.
 export async function runTool(name, args, { signal, changes } = {}) {
   if (name === "shell") {
-    return runShell(shellCommand(args), { signal, timeoutMs: shellTimeout(args.timeout) * 1000 });
+    const cmd = shellCommand(args);
+    if (args.background) return startInBackground(cmd, signal);
+    return runShell(cmd, { signal, timeoutMs: shellTimeout(args.timeout) * 1000 });
+  }
+
+  if (name === "process_output") {
+    const proc = backgroundProcesses.get(args.id);
+    const wait = Math.min(Math.max(0, Number(args.wait) || 0), MAX_OUTPUT_WAIT);
+    await backgroundProcesses.waitForOutput(proc, wait, signal);
+    return processReport(proc);
+  }
+
+  if (name === "stop_process") {
+    const proc = backgroundProcesses.get(args.id);
+    await proc.stop();
+    return processReport(proc);
   }
 
   if (name === "git") {
@@ -695,6 +943,16 @@ export async function runTool(name, args, { signal, changes } = {}) {
 
   if (name === "read_file") {
     return readFile(args);
+  }
+
+  // The model can't take an image in a tool result: it comes in a message after the results.
+  if (name === "view_image") {
+    const part = imagePart(safeProjectPath(requireString(args, "path")), args.path);
+    return { content: `${args.path} follows as an image.`, parts: [{ type: "text", text: `${args.path}:` }, part] };
+  }
+
+  if (name === "fetch_url") {
+    return fetchUrl(args.url, { start: args.start, maxChars: MAX_TOOL_OUTPUT, signal });
   }
 
   // Models often send "" or null for "the project root".
@@ -739,14 +997,31 @@ export async function runTool(name, args, { signal, changes } = {}) {
     return "ok";
   }
 
+  if (name === "delete_file") {
+    const { path, folder, files } = plannedDelete(args);
+    trackChange(changes, files, () => {
+      rmSync(path, { recursive: true });
+      removeEmptyFolders(dirname(path));
+    });
+    return folder ? `deleted ${args.path} (a folder with ${files.length === 1 ? "1 file" : `${files.length} files`})` : `deleted ${args.path}`;
+  }
+
+  if (name === "move_file") {
+    const { from, to, files } = plannedMove(args);
+    trackChange(changes, files, () => {
+      mkdirSync(dirname(to), { recursive: true });
+      moveSync(from, to);
+      removeEmptyFolders(dirname(from));
+    });
+    return `moved ${args.from} to ${args.to}`;
+  }
+
   if (name === "write_asset") {
     const { path, content } = plannedAsset(args);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, content);
 
-    // Keeps .agent out of git in any project the agent runs in, the way .pytest_cache does.
-    const ignoreFile = safeProjectPath(".agent/.gitignore");
-    if (!existsSync(ignoreFile)) writeFileSync(ignoreFile, "*\n");
+    ignoreAgentFolder();
     return `saved to ${ASSET_DIR}/${args.path}`;
   }
 

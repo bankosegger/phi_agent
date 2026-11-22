@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
-import { checkToolCall, runTool, tools } from "./tools.mjs";
+import { checkToolCall, runTool, toolsFor } from "./tools.mjs";
 
 const DEFAULT_MAX_TOOL_ROUNDS = 25;
 const MAX_INSTRUCTIONS = 20_000;
@@ -9,12 +10,21 @@ export const INSTRUCTIONS_FILE = "AGENTS.md";
 export const CANCELLED = "cancelled by user";
 export const SKIPPED = "skipped by user";
 
-// The project's AGENTS.md (a README for coding agents: how to build, test, conventions), or
-// null if it has none.
-export function readProjectInstructions(cwd = process.cwd()) {
+// Plan mode: the model looks around and replies with a plan, changing nothing. Only these tools
+// run; the others are refused, though still offered, since some providers reject a request
+// whose history has calls to tools it doesn't list.
+const LOOKING_TOOLS = new Set(["read_file", "list_dir", "find_files", "grep", "git", "view_image", "fetch_url", "process_output"]);
+export const PLAN_NOTE =
+  "(Plan mode: look around as much as you need, but change nothing: no file changes, and no commands. Reply with a plan of what you would do and why, for me to approve.)";
+const PLAN_REFUSAL = "plan mode is on, so nothing can be changed or run yet: put this step in your plan instead";
+
+// The user's own settings folder, in their home folder: ~/.phi-agent.
+export const USER_DIR = ".phi-agent";
+
+function readInstructions(path) {
   let text;
   try {
-    text = readFileSync(join(cwd, INSTRUCTIONS_FILE), "utf8").trim();
+    text = readFileSync(path, "utf8").trim();
   } catch {
     return null;
   }
@@ -22,18 +32,45 @@ export function readProjectInstructions(cwd = process.cwd()) {
   return text.length > MAX_INSTRUCTIONS ? `${text.slice(0, MAX_INSTRUCTIONS)}\n[truncated]` : text;
 }
 
-export function systemPrompt({ cwd = process.cwd(), platform = process.platform, date = new Date(), instructions = null, sandbox = false } = {}) {
+// The project's AGENTS.md (a README for coding agents: how to build, test, conventions), or
+// null if it has none.
+export function readProjectInstructions(cwd = process.cwd()) {
+  return readInstructions(join(cwd, INSTRUCTIONS_FILE));
+}
+
+// The user's own AGENTS.md in ~/.phi-agent, for all their projects (like how they like to
+// work, or what their machine has), or null if they have none.
+export function readUserInstructions(home = homedir()) {
+  return readInstructions(join(home, USER_DIR, INSTRUCTIONS_FILE));
+}
+
+// The date where the user is, like 2026-11-22 (toISOString would give the date in UTC).
+function localDate(date) {
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+export function systemPrompt({
+  cwd = process.cwd(),
+  platform = process.platform,
+  date = new Date(),
+  instructions = null,
+  userInstructions = null,
+  sandbox = false,
+} = {}) {
   const shell = platform === "win32" ? "cmd.exe" : "/bin/sh";
 
   const lines = [
     "You are a basic coding agent. Use tools to inspect and change project files.",
-    "Prefer read_file, list_dir, find_files, grep and git over shell for exploring the project. Use edit_file for small changes to existing files.",
+    "Prefer read_file, list_dir, find_files, grep and git over shell for exploring the project, and fetch_url over curl for reading web pages. Use edit_file for small changes to existing files.",
+    "Delete, move and rename files and folders with delete_file and move_file rather than shell, so the user can undo it.",
+    "Start servers and watchers that keep running with shell's background option, check on them with process_output, and stop them with stop_process when you no longer need them, unless the user wants them left running.",
     "New files can't be created at the project root: put them in a folder like src/. Existing root files, like package.json or README.md, can be edited. Save generated output that isn't project source, like a report or an export, with write_asset.",
     `The user can decline file changes and shell commands. When a tool result is "${SKIPPED}", do not retry it; ask the user what they want instead.`,
     "",
     `Project directory: ${cwd}`,
     `Platform: ${platform}; the shell tool runs commands with ${shell}.`,
-    `Today's date: ${date.toISOString().slice(0, 10)}`,
+    `Today's date: ${localDate(date)}`,
   ];
   if (sandbox) {
     lines.push(
@@ -41,20 +78,29 @@ export function systemPrompt({ cwd = process.cwd(), platform = process.platform,
       "The project's .git is read-only here, so you can't commit; the user does that. In a Node project, node_modules is separate from the user's: run npm install if packages are missing.",
     );
   }
+  if (userInstructions) {
+    lines.push("", `Instructions from the user's own ${INSTRUCTIONS_FILE}, for all their projects:`, "", userInstructions);
+  }
   if (instructions) {
-    lines.push("", `Instructions from the project's ${INSTRUCTIONS_FILE}. Follow them unless the user says otherwise:`, "", instructions);
+    const order = userInstructions ? "; where they disagree with the user's own, follow these" : "";
+    lines.push("", `Instructions from the project's ${INSTRUCTIONS_FILE}. Follow them unless the user says otherwise${order}:`, "", instructions);
   }
   return lines.join("\n");
 }
 
-// A new conversation. Its system prompt includes the project's AGENTS.md, unless
-// `instructions` is given (null for none).
-export function createMessages({ instructions, ...env } = {}) {
+// A new conversation. Its system prompt includes the project's AGENTS.md and the user's own,
+// unless `instructions` or `userInstructions` is given (null for none).
+export function createMessages({ instructions, userInstructions, ...env } = {}) {
   const cwd = env.cwd ?? process.cwd();
   return [
     {
       role: "system",
-      content: systemPrompt({ ...env, cwd, instructions: instructions === undefined ? readProjectInstructions(cwd) : instructions }),
+      content: systemPrompt({
+        ...env,
+        cwd,
+        instructions: instructions === undefined ? readProjectInstructions(cwd) : instructions,
+        userInstructions: userInstructions === undefined ? readUserInstructions() : userInstructions,
+      }),
     },
   ];
 }
@@ -115,9 +161,9 @@ function parseArguments(json) {
   return args;
 }
 
-// Resolves to { status: "ok" | "error" | "skipped" | "cancelled", content }, where content is
-// what the model is told.
-async function callTool(call, { confirmTool, onToolCall, onActivity, signal, changes }) {
+// Resolves to { status: "ok" | "error" | "skipped" | "cancelled", content, parts }, where content
+// is what the model is told, and parts (from view_image) are message parts to show it after.
+async function callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode }) {
   const cancelled = { status: "cancelled", content: CANCELLED };
   if (signal?.aborted) return cancelled;
 
@@ -133,6 +179,7 @@ async function callTool(call, { confirmTool, onToolCall, onActivity, signal, cha
 
   try {
     onToolCall(name, args);
+    if (planMode && !LOOKING_TOOLS.has(name)) return { status: "error", content: `error: ${PLAN_REFUSAL}` };
     // A call that would fail anyway, like an edit of text that isn't in the file, is reported
     // without asking the user to approve it.
     checkToolCall(name, args);
@@ -143,9 +190,10 @@ async function callTool(call, { confirmTool, onToolCall, onActivity, signal, cha
     if (!approved) return { status: "skipped", content: SKIPPED };
 
     // A cancelled shell command still returns its output so far, which the model should see.
-    onActivity?.({ type: "running", name });
-    const content = String(await runTool(name, args, { signal, changes }));
-    return { status: signal?.aborted ? "cancelled" : "ok", content };
+    onActivity?.({ type: "running", name, args });
+    const result = await runTool(name, args, { signal, changes });
+    const { content, parts } = typeof result === "object" && result !== null ? result : { content: String(result) };
+    return { status: signal?.aborted ? "cancelled" : "ok", content, ...(parts && { parts }) };
   } catch (error) {
     // An abort while confirming rejects the prompt; report it as a cancel, not a tool error.
     return signal?.aborted ? cancelled : { status: "error", content: `error: ${error.message}` };
@@ -159,17 +207,35 @@ const SUMMARY_REQUEST = [
 ].join(" ");
 const SUMMARY_NOTE = "Summary of our earlier conversation (the messages it replaces were removed to save context space):";
 
-async function requestReply({ openai, model, messages, context, signal, onToken, onUsage, onActivity }) {
+const IMAGE_OMITTED = "[an image was here, but this model can't see images]";
+
+// The conversation as a model that can't see images gets it: its images replaced with a note.
+// (They come from earlier, with a model that could.)
+function withoutImages(messages) {
+  return messages.map((message) =>
+    Array.isArray(message.content) && message.content.some((part) => part.type === "image_url")
+      ? { ...message, content: message.content.map((part) => (part.type === "image_url" ? { type: "text", text: IMAGE_OMITTED } : part)) }
+      : message,
+  );
+}
+
+// The messages and tools to send a model, depending on whether it can see images.
+function forModel(messages, canSeeImages) {
+  return canSeeImages ? { messages, tools: toolsFor() } : { messages: withoutImages(messages), tools: toolsFor({ images: false }) };
+}
+
+async function requestReply({ openai, model, messages, canSeeImages = true, context, signal, onToken, onUsage, onActivity }) {
   onActivity?.({ type: "waiting" });
+  const request = forModel(messages, canSeeImages);
   const stream = await openai.chat.completions.create(
-    { model, messages, tools, stream: true, stream_options: { include_usage: true } },
+    { model, ...request, stream: true, stream_options: { include_usage: true } },
     { signal },
   );
   return collectStream(stream, {
     onToken,
     onActivity,
     onUsage: (usage) => {
-      context?.measure(messages, usage);
+      context?.measure(request.messages, usage);
       onUsage?.(usage);
     },
   });
@@ -194,14 +260,24 @@ function fitSummaryRequest(request, context) {
  * summary in their place. Returns how many messages it replaced. With a ContextWindow as
  * `context`, a conversation too long to summarize whole is shortened first.
  */
-export async function compactMessages({ openai, model = process.env.MODEL || DEFAULT_MODEL, messages, upTo = messages.length, context, signal, onToken, onUsage }) {
+export async function compactMessages({
+  openai,
+  model = process.env.MODEL || DEFAULT_MODEL,
+  messages,
+  upTo = messages.length,
+  canSeeImages = true,
+  context,
+  signal,
+  onToken,
+  onUsage,
+}) {
   if (upTo < 2) return 0;
   const request = [...messages.slice(0, upTo), { role: "user", content: SUMMARY_REQUEST }];
   if (context) fitSummaryRequest(request, context);
 
   // The tools are sent because the history has tool calls, but the model may not call them now.
   const stream = await openai.chat.completions.create(
-    { model, messages: request, tools, tool_choice: "none", stream: true, stream_options: { include_usage: true } },
+    { model, ...forModel(request, canSeeImages), tool_choice: "none", stream: true, stream_options: { include_usage: true } },
     { signal },
   );
   const reply = await collectStream(stream, { onToken, onUsage });
@@ -258,11 +334,18 @@ async function makeRoom({ taskStart, overflowed = false, ...options }) {
  * and `onContextChange({ type, count })` hears when old tool output was "trimmed" or earlier
  * messages "compacted" into a summary.
  * File changes are recorded in `changes` (a FileChanges), if given, so they can be undone.
+ * `attachments` are image parts (see imagePart in images.mjs) to send with the task. Unless
+ * `canSeeImages` is false, the model gets the view_image tool; if it is false, images earlier in
+ * the conversation are left out of requests. In `planMode`, the model is asked for a plan, and
+ * only tools that look around run.
  * Aborting `signal` stops the turn and rejects with the signal's reason. Every tool call
  * already in `messages` still gets a result, so the conversation can continue afterwards.
  */
 export async function agentTurn({
   task,
+  attachments = [],
+  canSeeImages = true,
+  planMode = false,
   openai,
   messages,
   confirmTool,
@@ -279,8 +362,9 @@ export async function agentTurn({
   maxRounds = Number(process.env.MAX_TOOL_ROUNDS) || DEFAULT_MAX_TOOL_ROUNDS,
 }) {
   let taskStart = messages.length;
-  messages.push({ role: "user", content: task });
-  const options = { openai, model, messages, context, signal, onToken, onUsage, onActivity, onContextChange };
+  const text = planMode ? `${PLAN_NOTE}\n\n${task}` : task;
+  messages.push({ role: "user", content: attachments.length ? [{ type: "text", text }, ...attachments] : text });
+  const options = { openai, model, messages, canSeeImages, context, signal, onToken, onUsage, onActivity, onContextChange };
 
   for (let i = 0; i < maxRounds; i++) {
     signal?.throwIfAborted();
@@ -303,11 +387,16 @@ export async function agentTurn({
       return message.content ?? "";
     }
 
+    // Images that tools opened follow the results, since a tool result can only be text and
+    // nothing may come between a tool call and its result.
+    const parts = [];
     for (const call of message.tool_calls) {
-      const result = await callTool(call, { confirmTool, onToolCall, onActivity, signal, changes });
+      const result = await callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode });
       messages.push({ role: "tool", tool_call_id: call.id, content: result.content });
+      if (result.parts) parts.push(...result.parts);
       onToolResult?.(call.function.name, result);
     }
+    if (parts.length) messages.push({ role: "user", content: parts });
   }
 
   signal?.throwIfAborted();

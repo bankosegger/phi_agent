@@ -14,6 +14,7 @@ describe("dockerRunArgs", () => {
       tty: true,
       hasGitDir: true,
       hasPackageJson: true,
+      timeZone: "Europe/Vienna",
       platform: "win32",
     });
 
@@ -37,6 +38,8 @@ describe("dockerRunArgs", () => {
       "MODEL",
       "--env",
       "PHI_AGENT_HOST_PROJECT=C:\\Code\\my-app",
+      "--env",
+      "TZ=Europe/Vienna",
       "phi-agent-sandbox",
       "fix",
       "the tests",
@@ -69,6 +72,19 @@ describe("dockerRunArgs", () => {
       "2g",
       "phi-agent-sandbox",
     ]);
+  });
+
+  it("mounts the user's ~/.phi-agent read-only, where the agent looks for it", () => {
+    const args = dockerRunArgs({ projectDir: "/p", userDir: "/home/me/.phi-agent" });
+    expect(args).toContain("type=bind,source=/home/me/.phi-agent,target=/home/agent/.phi-agent,readonly");
+    expect(dockerRunArgs({ projectDir: "/p" }).join(" ")).not.toContain(".phi-agent");
+  });
+
+  it("gives the agent no input when it shouldn't read any, even in a terminal", () => {
+    const args = dockerRunArgs({ projectDir: "/p", agentArgs: ["-p", "hi"], attachInput: false, tty: true });
+    expect(args).not.toContain("--interactive");
+    expect(args).not.toContain("--tty");
+    expect(args.slice(-3)).toEqual(["phi-agent-sandbox", "-p", "hi"]);
   });
 });
 

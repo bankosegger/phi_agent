@@ -1,18 +1,52 @@
 #!/usr/bin/env node
 import dotenv from "dotenv";
 import OpenAI from "openai";
-import chalk from "chalk";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, sep } from "node:path";
 import { stdout as output } from "node:process";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_MODEL, INSTRUCTIONS_FILE, agentTurn, compactMessages, createMessages, readProjectInstructions } from "./src/agent-core.mjs";
+import {
+  DEFAULT_MODEL,
+  INSTRUCTIONS_FILE,
+  USER_DIR,
+  agentTurn,
+  compactMessages,
+  createMessages,
+  readProjectInstructions,
+  readUserInstructions,
+} from "./src/agent-core.mjs";
 import { FileChanges } from "./src/changes.mjs";
-import { ContextWindow, contextLengthOf, fetchContextLengths, isOverflowError } from "./src/context.mjs";
+import { USAGE, parseArgs } from "./src/cli-args.mjs";
+import { ContextWindow, fetchModels, isOverflowError, modelInfo } from "./src/context.mjs";
+import { imagePart, imagePathsIn } from "./src/images.mjs";
+import { createMarkdownWriter } from "./src/markdown.mjs";
+import { completeLine } from "./src/complete.mjs";
 import { createInput } from "./src/input.mjs";
 import { previewToolCall, previewToolResult } from "./src/preview.mjs";
+import { backgroundProcesses } from "./src/processes.mjs";
+import { PERMISSIONS_FILE, allows, loadRules, ruleFor, saveRules } from "./src/permissions.mjs";
 import { runInSandbox } from "./src/sandbox.mjs";
+import { listSessions, loadHistory, loadSession, newSessionFile, saveHistory, saveSession } from "./src/sessions.mjs";
 import { createStatus } from "./src/status.mjs";
+import { displayWidth, glyphs, hasColors, theme, truncateEnd } from "./src/theme.mjs";
 import { needsConfirmation } from "./src/tools.mjs";
+import {
+  banner,
+  confirmPrompt,
+  detailLines,
+  formatDuration,
+  formatTokens,
+  helpLines,
+  lineWidth,
+  markdownAsText,
+  nameList,
+  numberedLines,
+  outcomeLine,
+  plural,
+  taskFooter,
+  toolCallLine,
+} from "./src/ui.mjs";
 
 // Settings come from the .env next to this file, not the current directory, so the agent
 // can be started from any project folder.
@@ -20,132 +54,282 @@ const AGENT_DIR = dirname(fileURLToPath(import.meta.url));
 const ENV_FILE = join(AGENT_DIR, ".env");
 dotenv.config({ path: ENV_FILE, quiet: true });
 
+const cliArgs = process.argv.slice(2);
+let options;
+let firstTask;
+try {
+  ({ options, task: firstTask } = parseArgs(cliArgs));
+} catch (error) {
+  console.error(theme.danger(`${error.message}\nRun with --help for the options.`));
+  process.exit(2);
+}
+if (options.help) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
 if (!process.env.OPENROUTER_API_KEY) {
-  console.error(chalk.red(`OPENROUTER_API_KEY is not set. Add it to ${ENV_FILE} or to your environment.`));
+  console.error(theme.danger(`OPENROUTER_API_KEY is not set. Add it to ${ENV_FILE} or to your environment.`));
   process.exit(1);
 }
 
 // With --sandbox (or SANDBOX=docker in .env), this process only starts the agent in a Docker
 // container, attached to this terminal, and exits with its exit code.
 const IN_SANDBOX = process.env.PHI_AGENT_SANDBOX === "1";
-const cliArgs = process.argv.slice(2);
-const taskArgs = cliArgs.filter((arg) => arg !== "--sandbox");
 // `npm run agent --sandbox`, without the "--", leaves the flag to npm, which passes it on as
 // npm_config_sandbox. Honor it rather than run outside the sandbox the user asked for.
-const sandboxRequested = cliArgs.includes("--sandbox") || process.env.SANDBOX === "docker" || process.env.npm_config_sandbox === "true";
+const sandboxRequested = options.sandbox || process.env.SANDBOX === "docker" || process.env.npm_config_sandbox === "true";
 if (!IN_SANDBOX && sandboxRequested) {
   process.exit(
     await runInSandbox({
       agentDir: AGENT_DIR,
-      agentArgs: taskArgs,
-      info: (text) => console.error(chalk.dim(text)),
-      warn: (text) => console.error(chalk.red(text)),
+      agentArgs: cliArgs.filter((arg) => arg !== "--sandbox"),
+      // --print only reads input that is piped in. Attaching a terminal would leave the agent
+      // in the container waiting for input that the user never types.
+      attachInput: !options.print || !process.stdin.isTTY,
+      info: (text) => console.error(theme.muted(text)),
+      warn: (text) => console.error(theme.danger(text)),
     }),
   );
 }
 
-const HELP = `Commands:
-  /help          Show this help
-  /clear         Start a new conversation
-  /compact       Summarize the conversation so far, to free up the model's context
-  /undo          Revert the file changes of the last task (again for the task before)
-  /model [name]  Show the model, or switch to another OpenRouter model
-  /exit          Quit (also /quit, or Ctrl+C / Ctrl+D at the prompt)
+const VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(join(AGENT_DIR, "package.json"), "utf8")).version;
+  } catch {
+    return null;
+  }
+})();
 
-Press Ctrl+C while the agent is working to cancel the current task. Messages you
-enter while it works run after it. Pasted lines are sent together as one message.
-When asked to confirm a tool, answer y (yes), n (no), or a (always: run that tool
-without asking until you quit).`;
+// For Tab completion.
+const COMMANDS = ["/help", "/clear", "/resume", "/compact", "/undo", "/plan", "/model", "/processes", "/stop", "/permissions", "/exit", "/quit"];
+
+// Plan mode (/plan, or --plan): tasks only look around and end in a plan.
+let planMode = options.plan;
+
+// Background processes the model started end with the agent, however it ends. (Quitting
+// normally stops them before this.) On POSIX they have their own process group, so closing
+// the terminal wouldn't stop them otherwise.
+process.on("exit", () => backgroundProcesses.killAll());
+for (const [signal, code] of [
+  ["SIGTERM", 143],
+  ["SIGHUP", 129],
+]) {
+  process.on(signal, () => process.exit(code));
+}
 
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: process.env.OPENROUTER_API_KEY,
 });
 
-let model = process.env.MODEL || DEFAULT_MODEL;
+let model = options.model || process.env.MODEL || DEFAULT_MODEL;
 let messages;
 const context = new ContextWindow();
-let contextLengths = null; // each model's context window, once OpenRouter's model list is in
+let models = null; // what OpenRouter's model list says about each model, once it is in
 
-// Starts a conversation with the project's AGENTS.md, read afresh. Returns whether there is one.
+// The conversation's saved file and what the list of saved conversations shows about it:
+// { file, created, title, lastTask, tasks }. Null until it is first saved.
+let session = null;
+let saveFailed = false;
+
+// Starts a conversation with the project's AGENTS.md and the user's own, read afresh. Returns
+// the instructions files it follows, for the banner, like ["AGENTS.md"].
 function newConversation() {
   const instructions = readProjectInstructions();
-  messages = createMessages({ instructions, sandbox: IN_SANDBOX });
+  const userInstructions = readUserInstructions();
+  messages = createMessages({ instructions, userInstructions, sandbox: IN_SANDBOX });
   context.reset();
-  return instructions != null;
+  session = null;
+  return [instructions != null && INSTRUCTIONS_FILE, userInstructions != null && `~/${USER_DIR}/${INSTRUCTIONS_FILE}`].filter(Boolean);
+}
+
+// Text on one line, cut to `max` characters.
+function oneLine(text, max = 80) {
+  const line = String(text ?? "").replace(/\s+/g, " ").trim();
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+// Saves the conversation in .agent/sessions, so that it can be continued later. `task` is the
+// task that just ran, if any; the first one names the conversation in /resume's list.
+function saveConversation(task) {
+  if (messages.length < 2) return;
+  session ??= { file: newSessionFile(), created: new Date().toISOString(), title: oneLine(task ?? "untitled"), lastTask: null, tasks: 0 };
+  if (task != null) {
+    session.tasks++;
+    session.lastTask = oneLine(task);
+  }
+  const { file, ...about } = session;
+  try {
+    saveSession(file, { ...about, model, messages });
+  } catch (error) {
+    if (!saveFailed) print(warning(`Couldn't save the conversation: ${error.message}`));
+    saveFailed = true;
+  }
+}
+
+// Continues a saved conversation, which is saved to its own file from now on. Its system prompt
+// is written afresh, since the project's AGENTS.md may have changed.
+function resumeConversation(saved) {
+  newConversation();
+  messages.push(...saved.messages.slice(1));
+  const { file, created, title, lastTask, tasks } = saved;
+  session = { file, created, title, lastTask, tasks: tasks ?? 0 };
+}
+
+function startOfDay(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
+// "today 14:05", "yesterday 09:12" or "Nov 19 17:30", in the local time zone.
+function when(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "some time ago";
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const days = Math.round((startOfDay(new Date()) - startOfDay(date)) / 86_400_000);
+  if (days === 0) return `today ${time}`;
+  if (days === 1) return `yesterday ${time}`;
+  return `${date.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+}
+
+// What a resumed conversation was about: its first and last task, and the last reply.
+function showResumed(saved) {
+  const tasks = saved.tasks ?? 0;
+  print(`${theme.accent(glyphs.arrow)} Continuing ${theme.strong(saved.title || "untitled")} ${theme.muted(`from ${when(saved.updated)} · ${plural(tasks, "task")}`)}`);
+  if (saved.lastTask && tasks > 1) print(theme.muted(`  Last task: ${saved.lastTask}`));
+  const reply = messages.findLast((message) => message.role === "assistant" && typeof message.content === "string" && message.content.trim());
+  if (reply) {
+    const lines = reply.content.trim().split("\n");
+    const shown = [...lines.slice(0, 4).map(markdownAsText), ...(lines.length > 4 ? ["…"] : [])];
+    shown.forEach((line, i) => print(theme.muted(`  ${i === 0 ? "Last reply: " : ""}${line}`)));
+  }
 }
 
 // The model list loads in the background. Until it has (or if it can't), the context window
-// is assumed to be 128k tokens and the usage line shows the context in tokens, not percent.
-fetchContextLengths(openai).then(
-  (lengths) => {
-    contextLengths = lengths;
-    context.limit = contextLengthOf(lengths, model);
+// is assumed to be 128k tokens and the usage line shows the context in tokens, not percent,
+// and the model is assumed to see images.
+fetchModels(openai).then(
+  (list) => {
+    models = list;
+    context.limit = modelInfo(models, model)?.contextLength ?? null;
   },
   () => {},
 );
 
-function plural(count, word) {
-  return `${count} ${word}${count === 1 ? "" : "s"}`;
+function canSeeImages() {
+  return modelInfo(models, model)?.images !== false;
 }
 
-// "a, b, c and 4 more"
-function nameList(names, max = 5) {
-  const shown = names.slice(0, max).join(", ");
-  return names.length > max ? `${shown} and ${names.length - max} more` : shown;
-}
+// With --print, the agent runs one task without reading the terminal: the reply goes to stdout,
+// and everything else (tool calls, errors, usage) to stderr, so a script gets just the reply.
+const HEADLESS = options.print;
+const messageOutput = HEADLESS ? process.stderr : output;
 
-function formatTokens(count) {
-  return count < 1000 ? String(count) : `${(count / 1000).toFixed(1).replace(/\.0$/, "")}k`;
-}
+const info = (text) => theme.muted(text);
+const warning = (text) => theme.warning(`${glyphs.warn} ${text}`);
+const failure = (text) => theme.danger(`${glyphs.fail} ${text}`);
 
 // Ctrl+C cancels the running task (and drops messages entered for after it), or quits when
 // the agent is idle at the prompt. Ctrl+D (end of input) closes the input: open prompts give
 // up, but a running task finishes.
 let activeTask = null;
-const userInput = createInput({
-  onQueued: () => print(chalk.dim("  (queued: runs after the current task)")),
-});
-
-userInput.onInterrupt(() => {
-  if (!activeTask) return userInput.close();
-  activeTask.abort();
-  const dropped = userInput.clearQueue();
-  if (dropped) print(chalk.dim(`  (dropped ${plural(dropped, "queued message")})`));
-});
+let userInput = null;
+if (!HEADLESS) {
+  userInput = createInput({
+    onQueued: () => print(info(`  ${glyphs.arrow} Queued: runs after the current task`)),
+    // The up arrow brings back what was entered in this project before.
+    history: loadHistory(),
+    onHistory: (lines) => {
+      try {
+        saveHistory(lines);
+      } catch {
+        // A read-only project just doesn't keep its history.
+      }
+    },
+    completer: (line) => completeLine(line, { commands: COMMANDS, models: models ? [...models.keys()] : [] }),
+  });
+  userInput.onInterrupt(() => {
+    if (!activeTask) return userInput.close();
+    activeTask.abort();
+    const dropped = userInput.clearQueue();
+    if (dropped) print(info(`  Dropped ${plural(dropped, "queued message")}`));
+  });
+}
 
 // A spinner shows what the agent is waiting on. It steps aside while the user types ahead.
-const status = createStatus({ paused: () => userInput.typing });
-userInput.beforeKeypress(() => status.erase());
+const status = createStatus({
+  output: HEADLESS ? { isTTY: false } : output,
+  paused: () => Boolean(userInput?.typing),
+  hint: "Ctrl+C to cancel",
+});
+userInput?.beforeKeypress(() => status.erase());
 
-// Whether the cursor is after streamed reply text rather than at the start of a line.
-let lineOpen = false;
+// The model's replies, rendered as markdown as they stream into a terminal. Without colors
+// (NO_COLOR, say), rendering would only hide what marks code, so the markdown stays as it is.
+const replyWriter = createMarkdownWriter({
+  write: (text) => output.write(text),
+  columns: () => output.columns || 80,
+  enabled: Boolean(output.isTTY) && !HEADLESS && hasColors(),
+});
 
+// Ends the reply's line in progress, if any, so other output starts on a line of its own.
 function endLine() {
-  if (!lineOpen) return;
-  output.write("\n");
-  lineOpen = false;
+  replyWriter.endLine();
 }
 
 // Prints a line of output, on its own line, in place of the spinner (which comes back after).
 function print(text = "") {
   status.erase();
   endLine();
-  console.log(text);
+  messageOutput.write(`${text}\n`);
 }
 
-function writeToken(token, style = (text) => text) {
+function printLines(lines) {
+  for (const line of lines) print(line);
+}
+
+// What was shown last in a task, for spacing: a blank line goes between the model's text and
+// tool calls, and around a tool call that shows more than its own line, like a diff.
+// "none" at the start of a task, then "text", "tool" (a call on one line), "details" (a call
+// with lines under it) or "info" (like what a task changed).
+let lastBlock = "none";
+
+function startBlock(kind) {
+  if (lastBlock !== "none" && (kind !== lastBlock || kind === "details")) print();
+  lastBlock = kind;
+}
+
+// Writes streamed text from the model: markdown, or with `style` (like a dimmed summary) as it is.
+function writeToken(token, style = null) {
   status.stop();
-  output.write(style(token));
-  lineOpen = !token.endsWith("\n");
+  if (lastBlock !== "text") {
+    // Blank tokens before the text starts would only push it down.
+    if (!token.trim()) return;
+    startBlock("text");
+    replyWriter.reset();
+  }
+  if (style) replyWriter.write(style(token), { plain: true });
+  else replyWriter.write(token);
 }
 
-const WRITING = { write_file: "Writing", write_asset: "Writing", append_file: "Appending to", edit_file: "Editing" };
+const WRITING = { write_file: "Writing", write_asset: "Writing", append_file: "Appending to", edit_file: "Editing", delete_file: "Deleting" };
+
+// What a running tool is doing, like "Running the command".
+function runningText({ name, args }) {
+  if (name === "shell") return args?.background ? "Starting the command in the background" : "Running the command";
+  if (name === "process_output") return `Waiting for output from process ${args?.id}`;
+  if (name === "stop_process") return `Stopping process ${args?.id}`;
+  if (name === "fetch_url") return `Fetching ${URL.parse(args?.url)?.host ?? "the page"}`;
+  return `Running ${name}`;
+}
+
+// When the tool call running now started, for how long a command took.
+let toolStartedAt = 0;
 
 function activityText(activity) {
   if (activity.type === "waiting") return "Thinking";
   if (activity.type === "compacting") return "Summarizing the conversation to free up context";
-  if (activity.type === "running") return activity.name === "shell" ? "Running the command" : `Running ${activity.name}`;
+  if (activity.type === "running") return runningText(activity);
   // A tool call streaming in, like the content of a file the model is writing.
   let doing = activity.name === "shell" ? "Preparing a command" : `Preparing ${activity.name}`;
   if (activity.path && WRITING[activity.name]) doing = `${WRITING[activity.name]} ${activity.path}`;
@@ -153,71 +337,142 @@ function activityText(activity) {
 }
 
 function showActivity(activity) {
+  // A command's time counts from when it starts, not from when it was asked about.
+  if (activity.type === "running") toolStartedAt = Date.now();
   if (!status.enabled) return;
   endLine(); // the spinner needs a line of its own
   status.set(activityText(activity));
 }
 
-const PREVIEW_STYLES = {
-  add: (text) => chalk.green(`  + ${text}`),
-  remove: (text) => chalk.red(`  - ${text}`),
-  same: (text) => chalk.dim(`    ${text}`),
-  note: (text) => chalk.dim(`    ${text}`),
-  output: (text) => chalk.dim(`  │ ${text}`),
-  error: (text) => chalk.red(`  ✗ ${text}`),
-};
-
-function showLines(lines) {
-  for (const { kind, text } of lines) print(PREVIEW_STYLES[kind](text));
-}
-
 function showToolCall(name, args) {
   status.stop();
   const { summary, lines } = previewToolCall(name, args);
-  print(chalk.dim(`\n[tool] ${name} ${summary}`.trimEnd()));
-  showLines(lines);
+  startBlock(lines.length ? "details" : "tool");
+  print(toolCallLine(name, summary));
+  printLines(detailLines(lines));
+  toolStartedAt = Date.now();
 }
 
 function showToolResult(name, result) {
   status.stop();
-  showLines(previewToolResult(name, result));
+  const lines = previewToolResult(name, result);
+  // A command says how long it took, and that it worked when it did. (A command started in the
+  // background ends with a note on how it is doing instead.)
+  if (name === "shell" && result.status === "ok") {
+    const ms = Date.now() - toolStartedAt;
+    const took = ms >= 100 ? formatDuration(ms) : null; // "0.0s" would say nothing
+    const ending = lines.at(-1);
+    if (ending?.kind === "error") ending.text += took ? ` · ${took}` : "";
+    else if (ending?.kind !== "note") lines.push({ kind: "ok", text: took ?? "done" });
+  }
+  if (result.status === "skipped" && !HEADLESS) lines.push({ kind: "note", text: `${glyphs.skip} Skipped` });
+  if (!lines.length) return;
+  if (lastBlock === "tool") lastBlock = "details";
+  printLines(detailLines(lines));
 }
 
 const CONTEXT_CHANGES = {
-  trimmed: () => chalk.dim("  (removed old tool output to make room in the model's context)"),
-  compacted: () => chalk.dim("  (summarized the earlier conversation to make room in the model's context)"),
-  compactFailed: ({ error }) => chalk.yellow(`  (couldn't summarize the earlier conversation: ${error.message})`),
+  trimmed: () => info("Removed old tool output to make room in the model's context."),
+  compacted: () => info("Summarized the earlier conversation to make room in the model's context."),
+  compactFailed: ({ error }) => warning(`Couldn't summarize the earlier conversation: ${error.message}`),
 };
 
 function showContextChange(change) {
   status.stop();
+  startBlock("info");
   print(CONTEXT_CHANGES[change.type](change));
 }
 
-// Tools the user answered "always" for; they run without asking until the CLI exits.
-const alwaysAllowed = new Set();
+// The terminal's bell, which can flash the window or mark its tab, rings when the agent needs
+// the user after working for a while, since they may have turned to something else: at a
+// confirmation, or at the end of a long task. BELL=off in .env silences it.
+const BELL_AFTER_CONFIRM_MS = 10_000;
+const BELL_AFTER_TASK_MS = 30_000;
+let taskStartedAt = 0;
+
+function bell() {
+  if (output.isTTY && !HEADLESS && process.env.BELL !== "off") output.write("\x07");
+}
+
+// Tool calls allowed for good in this project (see permissions.mjs). A rule the user adds is
+// saved, or if it can't be, kept until the agent quits.
+let rules = loadRules();
+
+function describeRule(rule) {
+  if (rule.startsWith("shell: ")) return `commands that start with "${rule.slice(7)}" run`;
+  if (rule.startsWith("fetch_url: ")) return `pages on ${rule.slice(11)} are fetched`;
+  return `${rule} runs`;
+}
+
+function allowForGood(rule) {
+  rules = [...new Set([...rules, rule])];
+  try {
+    saveRules(rules);
+    printLines(detailLines([{ kind: "ok", text: `From now on, ${describeRule(rule)} without asking here.` }]));
+  } catch (error) {
+    print(outcomeLine(`Allowed until you quit: the rule couldn't be saved (${error.message}).`, { style: theme.warning, symbol: glyphs.warn }));
+  }
+}
 
 async function confirmTool(name, args, signal) {
-  if (!needsConfirmation(name) || alwaysAllowed.has(name)) return true;
+  if (!needsConfirmation(name) || options.yes || allows(rules, name, args)) return true;
+  if (HEADLESS) {
+    print(
+      outcomeLine('Skipped: it needs approval. Run with --yes, or allow it for good by answering "a" in an interactive session.', {
+        style: theme.warning,
+        symbol: glyphs.skip,
+      }),
+    );
+    return false;
+  }
 
-  const summary = name === "shell" ? args.cmd : args.path;
-  const answer = (await userInput.ask(chalk.yellow(`[confirm] ${name}: ${summary} [y/N/a=always] `), signal))?.trim().toLowerCase();
+  // A command that chains others, or that does damage that can't be undone, has no "always".
+  const rule = ruleFor(name, args);
+  if (Date.now() - taskStartedAt >= BELL_AFTER_CONFIRM_MS) bell();
+  status.stop();
+  endLine();
+  const answer = (await userInput.ask(confirmPrompt(name, args, rule, glyphs, output.columns), signal))?.trim().toLowerCase();
+  if (lastBlock === "tool") lastBlock = "details";
 
-  if (answer === "a" || answer === "always") {
-    alwaysAllowed.add(name);
-    print(chalk.dim(`    ${name} will run without asking until you quit.`));
+  if (rule && (answer === "a" || answer === "always")) {
+    allowForGood(rule);
     return true;
   }
   return answer === "y" || answer === "yes";
 }
 
+// /permissions lists what runs without asking; /permissions remove <n> takes a rule back.
+function permissions(argument) {
+  const remove = argument.match(/^remove\s+(\d+)$/i);
+  if (remove) {
+    const rule = rules[Number(remove[1]) - 1];
+    if (!rule) {
+      print(warning(`There's no rule ${remove[1]}. /permissions lists them.`));
+      return;
+    }
+    rules = rules.filter((other) => other !== rule);
+    saveRules(rules);
+    print(info(`Removed: ${describeRule(rule)} without asking.`));
+    return;
+  }
+  if (argument) {
+    print(warning("Use /permissions to list the rules, and /permissions remove <n> to remove one."));
+    return;
+  }
+
+  if (options.yes) print(warning("--yes is on: every tool call runs without asking."));
+  if (!rules.length) {
+    print(info('Nothing runs without asking yet. Answer "a" at a confirmation to allow something for good.'));
+    return;
+  }
+  print(theme.strong("Runs without asking in this project"));
+  printLines(numberedLines(rules.map(describeRule)));
+  print(info(`Remove one with /permissions remove <n>. The rules are saved in ${PERMISSIONS_FILE}.`));
+}
+
 // The file changes of each task that changed files, newest last, for /undo.
 const undoStack = [];
 let sessionCost = 0;
-
-function formatCost(dollars) {
-  return `$${dollars.toFixed(dollars < 0.01 ? 4 : 2)}`;
-}
 
 function newUsage() {
   return { requests: 0, input: 0, output: 0, cost: null };
@@ -231,30 +486,38 @@ function addUsage(total, usage) {
   if (typeof usage.cost === "number") total.cost = (total.cost ?? 0) + usage.cost;
 }
 
-// "12.3k tokens in · 456 out · $0.0021 (session $0.0300) · context 9% of 128k"
-function usageSummary({ input, output: out, cost }) {
-  const parts = [`${formatTokens(input)} tokens in`, `${formatTokens(out)} out`];
-  if (cost != null) parts.push(sessionCost > cost ? `${formatCost(cost)} (session ${formatCost(sessionCost)})` : formatCost(cost));
-  if (context.used != null) {
-    parts.push(
-      context.limit
-        ? `context ${Math.round((100 * context.used) / context.limit)}% of ${formatTokens(context.limit)}`
-        : `context ${formatTokens(context.used)} tokens`,
-    );
-  }
-  return parts.join(" · ");
-}
-
-// After a task or /compact: what it cost, and how full the model's context is.
-function showUsage(usage) {
+// After a task or /compact: how long it took, what it cost, and how full the model's context is.
+function showFooter(usage, startedAt) {
   sessionCost += usage.cost ?? 0;
-  if (usage.requests) print(chalk.dim(usageSummary(usage)));
+  startBlock("info");
+  print(taskFooter({ elapsed: Date.now() - startedAt, usage, sessionCost, context }, messageOutput.columns));
 }
 
 function showError(error, signal) {
-  if (signal.aborted) return print(chalk.yellow("[cancelled]"));
-  print(chalk.red(`[error] ${error.message}`));
-  if (isOverflowError(error)) print(chalk.dim("The conversation is too long for this model. /compact summarizes it; /clear starts over."));
+  startBlock("info");
+  if (signal.aborted) return print(theme.warning(`${glyphs.skip} Cancelled`));
+  print(failure(error.message));
+  if (isOverflowError(error)) print(info("  The conversation is too long for this model. /compact summarizes it; /clear starts over."));
+}
+
+// The images a task names (see imagePathsIn), as message parts, saying which were attached.
+function taskImages(task) {
+  const paths = imagePathsIn(task);
+  if (!paths.length) return [];
+  if (!canSeeImages()) {
+    print(warning(`${model} can't see images, so the model only gets their names. /model switches to one that can.`));
+    return [];
+  }
+  const parts = [];
+  for (const path of paths) {
+    try {
+      parts.push(imagePart(path));
+      print(info(`${glyphs.arrow} Attached ${path}`));
+    } catch (error) {
+      print(warning(`Couldn't attach ${error.message}`));
+    }
+  }
+  return parts;
 }
 
 async function runTask(task) {
@@ -262,12 +525,18 @@ async function runTask(task) {
   const changes = new FileChanges();
   const usage = newUsage();
   const saved = [];
+  lastBlock = "none";
+  const attachments = taskImages(task);
   activeTask = controller;
+  taskStartedAt = Date.now();
   let streamed = false;
 
   try {
     const reply = await agentTurn({
       task,
+      attachments,
+      canSeeImages: canSeeImages(),
+      planMode,
       openai,
       messages,
       model,
@@ -289,7 +558,10 @@ async function runTask(task) {
       onContextChange: showContextChange,
     });
     // Replies arrive through onToken, so only print here if nothing was streamed.
-    if (!streamed && reply) print(reply);
+    if (!streamed && reply) {
+      startBlock("text");
+      print(reply);
+    }
   } catch (error) {
     status.stop();
     showError(error, controller.signal);
@@ -302,22 +574,28 @@ async function runTask(task) {
   const changed = changes.paths;
   if (changed.length) {
     undoStack.push(changes);
-    print(chalk.dim(`Changed ${nameList(changed)} · /undo to revert`));
+    startBlock("info");
+    print(info(`Changed ${nameList(changed)} · /undo to revert`));
   }
-  if (saved.length) print(chalk.dim(`Saved ${nameList(saved)}`));
-  showUsage(usage);
+  if (saved.length) {
+    startBlock("info");
+    print(info(`Saved ${nameList(saved)}`));
+  }
+  showFooter(usage, taskStartedAt);
+  saveConversation(task);
+  if (Date.now() - taskStartedAt >= BELL_AFTER_TASK_MS) bell();
 }
 
 const UNDO_RESULTS = {
-  restored: (path) => `  restored ${path}`,
-  deleted: (path) => `  deleted ${path} (the agent created it)`,
-  kept: (path) => chalk.yellow(`  kept ${path}: it changed again after the agent wrote it`),
+  restored: (path) => `${theme.success(glyphs.ok)} Restored ${path}`,
+  deleted: (path) => `${theme.success(glyphs.ok)} Deleted ${path} ${info("(the agent created it)")}`,
+  kept: (path) => warning(`Kept ${path}: it changed again after the agent wrote it`),
 };
 
 function undo() {
   const changes = undoStack.pop();
   if (!changes) {
-    print(chalk.dim("Nothing to undo."));
+    print(info("Nothing to undo."));
     return;
   }
 
@@ -337,13 +615,15 @@ function undo() {
 // Replaces the conversation so far with a summary the model writes, which is shown as it comes.
 async function compact() {
   if (messages.length < 3) {
-    print(chalk.dim("Nothing to compact yet."));
+    print(info("Nothing to compact yet."));
     return;
   }
 
   const controller = new AbortController();
   const usage = newUsage();
   const before = context.estimate(messages);
+  const startedAt = Date.now();
+  lastBlock = "none";
   activeTask = controller;
   showActivity({ type: "compacting" });
   try {
@@ -351,14 +631,16 @@ async function compact() {
       openai,
       model,
       messages,
+      canSeeImages: canSeeImages(),
       context,
       signal: controller.signal,
       onUsage: (requestUsage) => addUsage(usage, requestUsage),
-      onToken: (token) => writeToken(token, chalk.dim),
+      onToken: (token) => writeToken(token, theme.muted),
     });
     endLine();
     context.reset();
-    print(chalk.dim(`\nCompacted the conversation from about ${formatTokens(before)} tokens to ${formatTokens(context.estimate(messages))}.`));
+    startBlock("info");
+    print(`${theme.success(glyphs.ok)} Compacted the conversation from about ${formatTokens(before)} tokens to ${formatTokens(context.estimate(messages))}.`);
   } catch (error) {
     status.stop();
     showError(error, controller.signal);
@@ -367,21 +649,124 @@ async function compact() {
     status.stop();
     endLine();
   }
-  showUsage(usage);
+  showFooter(usage, startedAt);
+}
+
+function processState(proc) {
+  if (proc.running) return `running for ${formatDuration(Date.now() - proc.startedAt)}`;
+  if (proc.stopped) return "stopped";
+  if (proc.exit.error) return `couldn't start: ${proc.exit.error.message}`;
+  return proc.exit.code != null ? `exited with code ${proc.exit.code}` : `ended by ${proc.exit.signal}`;
+}
+
+function showProcesses() {
+  const { list, running } = backgroundProcesses;
+  if (!list.length) {
+    print(info("No background processes. The agent starts them for servers and watchers that keep running."));
+    return;
+  }
+  print(theme.strong("Background processes"));
+  const width = lineWidth(output.columns);
+  for (const proc of list) {
+    const state = processState(proc);
+    const cmd = truncateEnd(proc.cmd, Math.max(20, width - displayWidth(`  ${proc.id}  ${state}`) - 2));
+    print(`  ${theme.accent(String(proc.id))}  ${cmd}  ${proc.running ? theme.success(state) : info(state)}`);
+    if (proc.lastLine) print(info(truncateEnd(`     ${glyphs.gutter} ${proc.lastLine}`, width)));
+  }
+  if (running.length) print(info("Stop one with /stop <number>, or all of them with /stop all."));
+}
+
+async function stopProcesses(argument) {
+  if (!argument) {
+    print(warning("Which one? /stop <number> stops a background process, /stop all stops them all."));
+    return;
+  }
+  const procs = argument === "all" ? backgroundProcesses.running : [backgroundProcesses.get(argument)];
+  const running = procs.filter((proc) => proc.running);
+  if (!running.length) {
+    print(info(argument === "all" ? "No background process is running." : `Process ${argument} isn't running.`));
+    return;
+  }
+
+  await Promise.all(running.map((proc) => proc.stop()));
+  const names = running.map((proc) => `${proc.id} (${proc.cmd})`).join(", ");
+  const shown = running.map((proc) => `${proc.id} ${info(`(${truncateEnd(proc.cmd, 40)})`)}`).join(", ");
+  print(`${theme.success(glyphs.ok)} Stopped ${running.length === 1 ? "process" : "processes"} ${shown}`);
+  // Tell the model, which would otherwise expect them to be running.
+  messages.push({ role: "user", content: `(I stopped background ${running.length === 1 ? "process" : "processes"} ${names}.)` });
+}
+
+// "128k tokens of context · sees images", as far as OpenRouter's model list says.
+function modelDetails() {
+  const about = modelInfo(models, model);
+  const details = [];
+  if (about?.contextLength) details.push(`${formatTokens(about.contextLength)} tokens of context`);
+  if (about?.images != null) details.push(about.images ? "sees images" : "text only");
+  return details.join(" · ");
+}
+
+// Warnings about the model: one OpenRouter doesn't list, or one that can't call tools.
+function modelWarning() {
+  if (!models) return null;
+  const about = modelInfo(models, model);
+  if (!about) return `${model} isn't in OpenRouter's model list; check the name at openrouter.ai/models.`;
+  if (about.tools === false) return `${model} can't call tools, so it can only talk: it can't read or change files, or run commands.`;
+  return null;
 }
 
 function showModel() {
-  const size = context.limit ? chalk.dim(` · ${formatTokens(context.limit)} tokens of context`) : "";
-  print(`${model}${size}\n${chalk.dim("Switch with /model <name>, using a model ID from openrouter.ai/models.")}`);
+  const details = modelDetails();
+  print(`${theme.accent(glyphs.tool)} ${theme.strong(model)}${details ? info(`  ${details}`) : ""}`);
+  const problem = modelWarning();
+  if (problem) print(warning(problem));
+  print(info("Switch with /model <name>, using a model ID from openrouter.ai/models (Tab completes them)."));
 }
 
 function switchModel(name) {
   model = name;
-  context.limit = contextLengthOf(contextLengths, model);
-  print(chalk.dim(`Using ${model} from the next task on.`));
-  if (contextLengths && !context.limit) {
-    print(chalk.yellow(`${model} isn't in OpenRouter's model list; check the name at openrouter.ai/models.`));
+  context.limit = modelInfo(models, model)?.contextLength ?? null;
+  const details = modelDetails();
+  print(`${theme.success(glyphs.ok)} Using ${theme.strong(model)} from the next task on${details ? info(`  ${details}`) : ""}`);
+  const problem = modelWarning();
+  if (problem) print(warning(problem));
+}
+
+// Stops the background processes, which a conversation started next wouldn't know about.
+async function stopForNewConversation() {
+  const stopped = await backgroundProcesses.stopAll();
+  if (stopped) print(info(`Stopped ${stopped === 1 ? "1 background process" : `${stopped} background processes`}.`));
+}
+
+// /resume lists the saved conversations; /resume <n> continues one of them.
+async function resume(argument) {
+  const sessions = listSessions();
+  if (!argument) {
+    if (!sessions.length) {
+      print(info("No saved conversations in this project yet. Each one is saved after its first task."));
+      return;
+    }
+    print(theme.strong("Saved conversations, last used first"));
+    printLines(
+      numberedLines(
+        sessions.slice(0, 10).map((saved) => {
+          const current = saved.file === session?.file ? theme.accent("  (this one)") : "";
+          return `${saved.title || "untitled"}  ${info(`${when(saved.updated)} · ${plural(saved.tasks ?? 0, "task")}`)}${current}`;
+        }),
+      ),
+    );
+    print(info("Continue one with /resume <number>."));
+    return;
   }
+
+  const chosen = sessions[Number(argument) - 1];
+  if (!/^\d+$/.test(argument) || !chosen) {
+    print(warning(`There's no saved conversation ${argument}. /resume lists them.`));
+    return;
+  }
+  const saved = loadSession(chosen.file);
+  await stopForNewConversation();
+  resumeConversation(saved);
+  showResumed(saved);
 }
 
 // Runs a slash command. Resolves to false when the CLI should quit.
@@ -392,10 +777,26 @@ async function runCommand(line) {
   if (command === "/exit" || command === "/quit") return false;
 
   if (command === "/help") {
-    print(HELP);
+    printLines(helpLines(output.columns));
   } else if (command === "/clear") {
-    const withInstructions = newConversation();
-    print(chalk.dim(`Started a new conversation${withInstructions ? ` (with ${INSTRUCTIONS_FILE})` : ""}.`));
+    await stopForNewConversation();
+    const following = newConversation();
+    print(`${theme.success(glyphs.ok)} Started a new conversation${following.length ? info(` (following ${following.join(" and ")})`) : ""}. ${info("/resume goes back to an earlier one.")}`);
+  } else if (command === "/resume") {
+    await resume(argument);
+  } else if (command === "/permissions") {
+    permissions(argument);
+  } else if (command === "/plan") {
+    planMode = !planMode;
+    print(
+      planMode
+        ? `${theme.plan("Plan mode on:")} ${info("the agent looks around and replies with a plan, changing nothing.")}`
+        : `${theme.success("Plan mode off:")} ${info("the agent can make changes again (they still ask first).")}`,
+    );
+  } else if (command === "/processes") {
+    showProcesses();
+  } else if (command === "/stop") {
+    await stopProcesses(argument);
   } else if (command === "/compact") {
     await compact();
   } else if (command === "/undo") {
@@ -405,49 +806,180 @@ async function runCommand(line) {
   } else if (command === "/model") {
     showModel();
   } else {
-    print(chalk.yellow(`Unknown command ${command}. Type /help for commands.`));
+    print(warning(`Unknown command ${command}. Type /help for commands.`));
   }
+  // /undo, /compact and /stop tell the model something; keep that in the saved conversation.
+  if (["/undo", "/compact", "/stop"].includes(command)) saveConversation();
   return true;
 }
 
-const firstTask = taskArgs.join(" ");
-const hasInstructions = newConversation();
+const following = newConversation();
 // In the sandbox, the project is at /workspace; show the folder it is on the host.
 const projectDir = IN_SANDBOX ? process.env.PHI_AGENT_HOST_PROJECT || process.cwd() : process.cwd();
 
-print(chalk.bold.cyan("Tiny Agent TUI"));
-print(
-  chalk.dim(
-    [model, projectDir, IN_SANDBOX && "in a Docker sandbox", hasInstructions && `following ${INSTRUCTIONS_FILE}`].filter(Boolean).join(" · "),
-  ),
-);
-print(chalk.dim("Type a task, or /help for commands.\n"));
-
-if (firstTask) {
-  await runTask(firstTask);
-  print();
+// The project folder as the banner shows it: in the home folder, from ~.
+function shownPath(path) {
+  const home = homedir();
+  if (!home || IN_SANDBOX) return path;
+  return path === home || path.startsWith(home + sep) ? `~${path.slice(home.length)}` : path;
 }
 
-while (true) {
-  const text = await userInput.next(chalk.cyan(": "));
-  if (text == null) break;
-  const line = text.trim();
-  if (!line) continue;
+// --continue: the conversation saved last in this project.
+let continued = null;
+if (options.continue) {
+  const latest = listSessions()[0];
+  try {
+    continued = latest && loadSession(latest.file);
+  } catch (error) {
+    print(warning(error.message));
+  }
+}
 
-  // "/help" is a command; "/src/app.js is broken" is a task.
-  if (/^\/[a-z]+(\s|$)/i.test(line)) {
-    try {
-      if (!(await runCommand(line.split("\n")[0]))) break;
-    } catch (error) {
-      print(chalk.red(`[error] ${error.message}`));
-    }
-    print();
-    continue;
+if (continued) {
+  resumeConversation(continued);
+} else if (options.continue) {
+  print(info("There's no saved conversation in this project yet, so this is a new one."));
+}
+
+// How long --print waits for piped input to start when the task was given as an argument too.
+// Some parents leave the agent's input open without ever writing to it.
+const PIPED_INPUT_WAIT_MS = 3000;
+
+// What was piped in, for --print: `git diff | phi-agent -p "review this"`. Without a task
+// argument, the input is the task, so it waits for all of it.
+function readPipedInput({ hasTask }) {
+  if (process.stdin.isTTY) return Promise.resolve("");
+  return new Promise((resolve) => {
+    const chunks = [];
+    const done = () => {
+      clearTimeout(timer);
+      resolve(Buffer.concat(chunks).toString("utf8").trim());
+    };
+    const timer = hasTask
+      ? setTimeout(() => {
+          if (chunks.length) return;
+          process.stdin.destroy();
+          done();
+        }, PIPED_INPUT_WAIT_MS)
+      : null;
+    process.stdin.on("data", (chunk) => chunks.push(chunk));
+    process.stdin.on("end", done);
+    process.stdin.on("error", done);
+  });
+}
+
+// --print: runs one task and writes the model's reply to stdout. Resolves to the exit code: 0
+// when the task ran, 1 when it failed, 2 without a task, 130 when cancelled with Ctrl+C.
+async function runPrint() {
+  const task = [firstTask, await readPipedInput({ hasTask: Boolean(firstTask) })].filter(Boolean).join("\n\n");
+  if (!task) {
+    print(failure("--print needs a task: give it as an argument, or pipe it in."));
+    return 2;
   }
 
-  print();
-  await runTask(line);
-  print();
+  const controller = new AbortController();
+  // Ctrl+C cancels the task, stopping the request or command it is waiting on; twice quits.
+  process.on("SIGINT", () => (controller.signal.aborted ? process.exit(130) : controller.abort()));
+  const changes = new FileChanges();
+  const usage = newUsage();
+  const startedAt = Date.now();
+  let progress = ""; // what the model writes before calling tools, which isn't the reply
+  let exitCode = 0;
+
+  try {
+    const reply = await agentTurn({
+      task,
+      attachments: taskImages(task),
+      canSeeImages: canSeeImages(),
+      planMode,
+      openai,
+      messages,
+      model,
+      changes,
+      context,
+      confirmTool,
+      signal: controller.signal,
+      onToken: (token) => (progress += token),
+      onToolCall: (name, args) => {
+        if (progress.trim()) {
+          startBlock("text");
+          print(info(progress.trim()));
+        }
+        progress = "";
+        showToolCall(name, args);
+      },
+      onToolResult: showToolResult,
+      onUsage: (requestUsage) => addUsage(usage, requestUsage),
+      onContextChange: showContextChange,
+    });
+    if (reply) output.write(reply.endsWith("\n") ? reply : `${reply}\n`);
+  } catch (error) {
+    showError(error, controller.signal);
+    exitCode = controller.signal.aborted ? 130 : 1;
+  }
+
+  if (changes.paths.length) {
+    startBlock("info");
+    print(info(`Changed ${nameList(changes.paths)}`));
+  }
+  showFooter(usage, startedAt);
+  saveConversation(task);
+  await backgroundProcesses.stopAll();
+  return exitCode;
 }
 
-userInput.close();
+// The prompt: "❯ ", or "plan ❯ " in plan mode.
+function prompt() {
+  const mark = theme.accent(theme.strong(glyphs.prompt));
+  return planMode ? `${theme.plan("plan")} ${mark} ` : `${mark} `;
+}
+
+async function runInteractive() {
+  printLines(
+    banner(
+      { version: VERSION, model, project: shownPath(projectDir), following, sandbox: IN_SANDBOX, plan: planMode, yes: options.yes },
+      output.columns,
+    ),
+  );
+  if (continued) showResumed(continued);
+  print();
+
+  if (firstTask) {
+    print(`${prompt()}${firstTask}`);
+    print();
+    await runTask(firstTask);
+    print();
+  }
+
+  while (true) {
+    const text = await userInput.next(prompt());
+    if (text == null) break;
+    const line = text.trim();
+    if (!line) continue;
+
+    // "/help" is a command; "/src/app.js is broken" is a task.
+    if (/^\/[a-z]+(\s|$)/i.test(line)) {
+      try {
+        if (!(await runCommand(line.split("\n")[0]))) break;
+      } catch (error) {
+        print(failure(error.message));
+      }
+      print();
+      continue;
+    }
+
+    print();
+    await runTask(line);
+    print();
+  }
+
+  const stopped = await backgroundProcesses.stopAll();
+  if (stopped) print(info(`Stopped ${stopped === 1 ? "1 background process" : `${stopped} background processes`}.`));
+  userInput.close();
+}
+
+if (HEADLESS) {
+  process.exitCode = await runPrint();
+} else {
+  await runInteractive();
+}

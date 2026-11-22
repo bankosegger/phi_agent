@@ -10,9 +10,22 @@ const PASTE_WINDOW_MS = 50;
  * is one task, not one per line. Inputs entered while nothing is asking for one (the agent is
  * working) wait for the next prompt; `onQueued(text)` is told about each.
  * Piped input is read a line at a time, in order: its lines answer confirmation questions too.
+ * In a terminal, the up arrow brings back earlier lines: `history` (newest first) and those
+ * entered since, which `onHistory(lines)` is told about. Answers to questions stay out of it.
+ * `completer(line)` completes the line on Tab, as readline's completer does.
  */
-export function createInput({ input = process.stdin, output = process.stdout, terminal, onQueued, pasteWindowMs = PASTE_WINDOW_MS } = {}) {
-  const rl = readline.createInterface({ input, output, terminal });
+export function createInput({
+  input = process.stdin,
+  output = process.stdout,
+  terminal,
+  onQueued,
+  history = [],
+  onHistory,
+  completer,
+  pasteWindowMs = PASTE_WINDOW_MS,
+} = {}) {
+  const rl = readline.createInterface({ input, output, terminal, history: [...history], historySize: 500, removeHistoryDuplicates: true, completer });
+  rl.on("history", (lines) => onHistory?.(lines));
   const closed = new AbortController();
   const queued = [];
   let paste = null; // { lines, timer } while pasted lines are arriving
@@ -43,6 +56,11 @@ export function createInput({ input = process.stdin, output = process.stdout, te
     const { lines, timer } = paste;
     clearTimeout(timer);
     paste = null;
+    // History holds single lines: a pasted error message's lines one by one would only clutter it.
+    if (lines.length > 1) {
+      rl.history.splice(0, lines.filter((line) => line.trim()).length); // readline skips blank lines
+      onHistory?.(rl.history);
+    }
     deliver(lines.join("\n"));
   };
 
@@ -89,6 +107,11 @@ export function createInput({ input = process.stdin, output = process.stdout, te
       try {
         const answer = await rl.question(query, { signal: AbortSignal.any(signals) });
         echo(answer);
+        // A "y" isn't worth bringing back with the up arrow.
+        if (rl.terminal && answer && rl.history[0] === answer) {
+          rl.history.shift();
+          onHistory?.(rl.history);
+        }
         return answer;
       } catch (error) {
         if (error.name !== "AbortError") throw error;

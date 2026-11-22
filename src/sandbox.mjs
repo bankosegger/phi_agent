@@ -1,7 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { USER_DIR } from "./agent-core.mjs";
 
 // Runs the agent in a Docker container (the image is built from the Dockerfile next to
 // agent.mjs), working on the project mounted at /workspace.
@@ -62,21 +64,28 @@ export function dockerRunArgs({
   projectDir,
   agentArgs = [],
   env = {},
+  attachInput = true,
   tty = false,
   user = null,
   hasGitDir = false,
   hasPackageJson = false,
+  userDir = null,
+  timeZone = null,
   extraArgs = [],
   platform = process.platform,
 }) {
-  const args = ["run", "--rm", "--interactive", "--init", "--security-opt", "no-new-privileges"];
-  if (tty) args.push("--tty");
+  const args = ["run", "--rm", ...(attachInput ? ["--interactive"] : []), "--init", "--security-opt", "no-new-privileges"];
+  if (tty && attachInput) args.push("--tty");
   if (user) args.push("--user", user);
   args.push(...mount("bind", projectDir, "/workspace"));
   if (hasGitDir) args.push(...mount("bind", join(projectDir, ".git"), "/workspace/.git", { readonly: true }));
   if (hasPackageJson) args.push(...mount("volume", nodeModulesVolume(projectDir, platform), "/workspace/node_modules"));
+  // The user's ~/.phi-agent, with their own AGENTS.md, which the agent reads but can't change.
+  if (userDir) args.push(...mount("bind", userDir, `/home/agent/${USER_DIR}`, { readonly: true }));
   for (const name of PASSED_ENV) if (env[name]) args.push("--env", name);
   args.push("--env", `PHI_AGENT_HOST_PROJECT=${projectDir}`);
+  // The container's clock runs in UTC; the user's time zone keeps "today" the same day.
+  if (timeZone) args.push("--env", `TZ=${timeZone}`);
   return [...args, ...extraArgs, SANDBOX_IMAGE, ...agentArgs];
 }
 
@@ -118,9 +127,10 @@ function isDirectory(path) {
 
 /**
  * Runs the agent in the sandbox on `projectDir` with this terminal attached, passing it
- * `agentArgs`, and resolves to its exit code. `info` and `warn` show progress and problems.
+ * `agentArgs`, and resolves to its exit code. Without `attachInput`, the agent in the container
+ * gets no input. `info` and `warn` show progress and problems.
  */
-export async function runInSandbox({ agentDir, projectDir = process.cwd(), agentArgs = [], env = process.env, info, warn }) {
+export async function runInSandbox({ agentDir, projectDir = process.cwd(), agentArgs = [], env = process.env, attachInput = true, info, warn }) {
   if (!existsSync(join(agentDir, "Dockerfile"))) {
     warn(`There is no Dockerfile in ${agentDir} to build the sandbox from.`);
     return 1;
@@ -139,10 +149,15 @@ export async function runInSandbox({ agentDir, projectDir = process.cwd(), agent
     projectDir,
     agentArgs,
     env,
+    attachInput,
     tty: Boolean(process.stdin.isTTY && process.stdout.isTTY),
     user: typeof process.getuid === "function" ? `${process.getuid()}:${process.getgid()}` : null,
     hasGitDir: isDirectory(join(projectDir, ".git")),
     hasPackageJson: existsSync(join(projectDir, "package.json")),
+    userDir: isDirectory(join(homedir(), USER_DIR)) ? join(homedir(), USER_DIR) : null,
+    // TZ if it names a zone (":/etc/localtime" would mean the container's file), or else the
+    // zone the computer is set to.
+    timeZone: (env.TZ && !env.TZ.startsWith(":") ? env.TZ : Intl.DateTimeFormat().resolvedOptions().timeZone) || null,
     extraArgs: extraDockerArgs(env.SANDBOX_DOCKER_ARGS),
   });
 
@@ -151,7 +166,7 @@ export async function runInSandbox({ agentDir, projectDir = process.cwd(), agent
   process.on("SIGINT", ignore);
   try {
     return await new Promise((resolveCode) => {
-      const child = spawn("docker", args, { stdio: "inherit", env });
+      const child = spawn("docker", args, { stdio: [attachInput ? "inherit" : "ignore", "inherit", "inherit"], env });
       child.on("error", (error) => {
         warn(`Docker couldn't start the sandbox: ${error.message}`);
         resolveCode(1);

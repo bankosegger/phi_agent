@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chdir, cwd } from "node:process";
-import { CANCELLED, agentTurn, compactMessages, createMessages, readProjectInstructions, systemPrompt } from "./agent-core.mjs";
+import { CANCELLED, PLAN_NOTE, agentTurn, compactMessages, createMessages, readProjectInstructions, readUserInstructions, systemPrompt } from "./agent-core.mjs";
 import { FileChanges } from "./changes.mjs";
 import { ContextWindow } from "./context.mjs";
 
@@ -70,7 +70,8 @@ function toolCallDelta(index, name, args) {
 
 describe("systemPrompt", () => {
   it("describes the project directory, shell and date", () => {
-    const date = new Date("2026-01-02T03:00:00Z");
+    // Half past midnight where the user is: in UTC, east of Greenwich, it is still January 1.
+    const date = new Date(2026, 0, 2, 0, 30);
 
     const windows = systemPrompt({ cwd: "C:\\proj", platform: "win32", date });
     expect(windows).toContain("Project directory: C:\\proj");
@@ -84,16 +85,30 @@ describe("systemPrompt", () => {
     const sandboxed = systemPrompt({ cwd: "/workspace", platform: "linux", sandbox: true });
     expect(sandboxed).toContain("You run in a Docker sandbox");
     expect(sandboxed).toContain("read-only");
-    expect(createMessages({ cwd: "/workspace", platform: "linux", instructions: null, sandbox: true })[0].content).toBe(
+    expect(createMessages({ cwd: "/workspace", platform: "linux", instructions: null, userInstructions: null, sandbox: true })[0].content).toBe(
       systemPrompt({ cwd: "/workspace", platform: "linux", sandbox: true }),
     );
     expect(systemPrompt({ cwd: "/proj", platform: "linux" })).not.toContain("sandbox");
   });
 
   it("starts the conversation with it", () => {
-    expect(createMessages({ cwd: "/proj", platform: "linux" })).toEqual([
+    expect(createMessages({ cwd: "/proj", platform: "linux", userInstructions: null })).toEqual([
       { role: "system", content: systemPrompt({ cwd: "/proj", platform: "linux" }) },
     ]);
+  });
+
+  it("includes the user's own AGENTS.md from ~/.phi-agent, before the project's", async () => {
+    await inTempDir(async (home) => {
+      expect(readUserInstructions(home)).toBe(null);
+      mkdirSync(join(home, ".phi-agent"));
+      writeFileSync(join(home, ".phi-agent", "AGENTS.md"), "Answer in British English.\n");
+      expect(readUserInstructions(home)).toBe("Answer in British English.");
+
+      const prompt = systemPrompt({ userInstructions: "Answer in British English.", instructions: "Use tabs." });
+      expect(prompt).toContain("Instructions from the user's own AGENTS.md, for all their projects:\n\nAnswer in British English.");
+      expect(prompt).toMatch(/where they disagree with the user's own, follow these:\n\nUse tabs\.$/);
+      expect(systemPrompt({ instructions: "Use tabs." })).not.toContain("user's own");
+    });
   });
 
   it("includes the project's AGENTS.md", async () => {
@@ -105,7 +120,7 @@ describe("systemPrompt", () => {
       writeFileSync("AGENTS.md", "# Notes\nRun npm test before finishing.\n");
       expect(readProjectInstructions(dir)).toBe("# Notes\nRun npm test before finishing.");
 
-      const [system] = createMessages({ cwd: dir });
+      const [system] = createMessages({ cwd: dir, userInstructions: null });
       expect(system.content).toContain("Instructions from the project's AGENTS.md");
       expect(system.content).toMatch(/Run npm test before finishing\.$/);
       expect(createMessages({ cwd: dir, instructions: null })[0].content).not.toContain("AGENTS.md");
@@ -234,6 +249,88 @@ describe("agentTurn", () => {
 
       expect(changes.paths).toEqual(["src/a.txt"]);
     });
+  });
+});
+
+// The smallest valid PNG: a 1x1 transparent pixel.
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
+const PNG_PART = { type: "image_url", image_url: { url: `data:image/png;base64,${PNG.toString("base64")}` } };
+
+describe("agentTurn plan mode", () => {
+  it("asks for a plan, and runs only the tools that look around", async () => {
+    await inTempDir(async () => {
+      writeFileSync("notes.txt", "old\n");
+      const openai = fakeOpenai([
+        [toolCallDelta(0, "read_file", { path: "notes.txt" }), toolCallDelta(1, "write_file", { path: "notes.txt", content: "new\n" }), toolCallDelta(2, "shell", { cmd: "echo hi" })],
+        [{ content: "Plan: change notes.txt." }],
+      ]);
+      const asked = [];
+      const results = [];
+
+      await agentTurn({
+        task: "update the notes",
+        planMode: true,
+        openai,
+        messages: createMessages({ instructions: null, userInstructions: null }),
+        confirmTool: async (name) => asked.push(name) > 0,
+        onToolCall: () => {},
+        onToolResult: (name, { status, content }) => results.push([name, status, content]),
+      });
+
+      expect(openai.bodies[0].messages[1].content).toBe(`${PLAN_NOTE}\n\nupdate the notes`);
+      expect(results.map(([name, status]) => [name, status])).toEqual([
+        ["read_file", "ok"],
+        ["write_file", "error"],
+        ["shell", "error"],
+      ]);
+      expect(results[1][2]).toMatch(/^error: plan mode is on/);
+      expect(asked).toEqual(["read_file"]); // the others were refused before anyone was asked
+      expect(readFileSync("notes.txt", "utf8")).toBe("old\n");
+    });
+  });
+});
+
+describe("agentTurn images", () => {
+  it("shows the model an image it opens, after the results of all its tool calls", async () => {
+    await inTempDir(async () => {
+      writeFileSync("shot.png", PNG);
+      const openai = fakeOpenai([[toolCallDelta(0, "view_image", { path: "shot.png" }), toolCallDelta(1, "list_dir", {})], [{ content: "A tiny image." }]]);
+      const messages = createMessages({ instructions: null });
+
+      await agentTurn({ task: "look at shot.png", openai, messages, confirmTool: async () => true, onToolCall: () => {} });
+
+      expect(openai.bodies[0].tools.map((tool) => tool.function.name)).toContain("view_image");
+      expect(openai.bodies[1].messages.slice(2).map(({ role, content }) => [role, content])).toEqual([
+        ["assistant", null],
+        ["tool", "shot.png follows as an image."],
+        ["tool", "shot.png"],
+        ["user", [{ type: "text", text: "shot.png:" }, PNG_PART]],
+      ]);
+    });
+  });
+
+  it("sends images the user attached with the task", async () => {
+    const openai = fakeOpenai([[{ content: "I see it." }]]);
+    await agentTurn({ task: "what's wrong here?", attachments: [PNG_PART], openai, messages: createMessages({ instructions: null }), confirmTool: async () => true });
+
+    expect(openai.bodies[0].messages[1]).toEqual({ role: "user", content: [{ type: "text", text: "what's wrong here?" }, PNG_PART] });
+  });
+
+  it("leaves images out for a model that can't see them", async () => {
+    const openai = fakeOpenai([[{ content: "ok" }], [{ content: "Summary." }]]);
+    const messages = [...createMessages({ instructions: null }), { role: "user", content: [{ type: "text", text: "see this" }, PNG_PART] }, { role: "assistant", content: "A pixel." }];
+
+    await agentTurn({ task: "and now?", canSeeImages: false, openai, messages, confirmTool: async () => true });
+    await compactMessages({ openai, messages, canSeeImages: false });
+
+    for (const body of openai.bodies) {
+      expect(body.tools.map((tool) => tool.function.name)).not.toContain("view_image");
+      expect(JSON.stringify(body.messages)).not.toContain("image_url");
+    }
+    expect(openai.bodies[0].messages[1].content[1]).toEqual({ type: "text", text: "[an image was here, but this model can't see images]" });
+    // The conversation itself keeps the image, for a model that can see it.
+    expect(messages).toHaveLength(2);
+    expect(JSON.stringify(openai.bodies[1].messages)).toContain("see this");
   });
 });
 
@@ -380,7 +477,7 @@ describe("agentTurn checks and progress", () => {
         { type: "tool", name: "write_file", path: null, chars: 0 },
         { type: "tool", name: "write_file", path: "src/a b.txt", chars: start.length },
         { type: "tool", name: "write_file", path: "src/a b.txt", chars: start.length + end.length },
-        { type: "running", name: "write_file" },
+        { type: "running", name: "write_file", args: { path: "src/a b.txt", content: "hi" } },
         { type: "waiting" },
       ]);
     });

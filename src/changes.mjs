@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { dirname, relative } from "node:path";
 
 // The file's bytes, or null if it does not exist.
@@ -38,9 +38,12 @@ function removeEmptyFolders(dir, top) {
 export class FileChanges {
   #files = new Map(); // full path -> { path, before, after, createdFolder }
 
-  // Runs write(), which changes the file at fullPath, after noting what the file held.
-  track(fullPath, write) {
-    if (!this.#files.has(fullPath)) {
+  // Runs write(), which changes the files at fullPaths (one full path, or several, as for a
+  // move), after noting what they held.
+  track(fullPaths, write) {
+    const paths = [fullPaths].flat();
+    for (const fullPath of paths) {
+      if (this.#files.has(fullPath)) continue;
       this.#files.set(fullPath, {
         path: relative(process.cwd(), fullPath).replaceAll("\\", "/"),
         before: snapshot(fullPath),
@@ -50,7 +53,7 @@ export class FileChanges {
     try {
       return write();
     } finally {
-      this.#files.get(fullPath).after = snapshot(fullPath);
+      for (const fullPath of paths) this.#files.get(fullPath).after = snapshot(fullPath);
     }
   }
 
@@ -60,10 +63,10 @@ export class FileChanges {
   }
 
   /**
-   * Puts the changed files back, newest change first: restores what a file held, or deletes it
-   * (and any folders made for it) if the agent created it. A file that changed again since, by
-   * the user or a shell command, is kept as it is.
-   * Returns [{ path, action: "restored" | "deleted" | "kept" }].
+   * Puts the changed files back, newest change first: restores what a file held (a deleted or
+   * moved file comes back where it was), or deletes it (and any folders made for it) if the
+   * agent created it. A file that changed again since, by the user or a shell command, is kept
+   * as it is. Returns [{ path, action: "restored" | "deleted" | "kept" }].
    */
   undo() {
     const results = [];
@@ -77,6 +80,8 @@ export class FileChanges {
         removeEmptyFolders(dirname(fullPath), file.createdFolder);
         results.push({ path: file.path, action: "deleted" });
       } else {
+        // Deleting or moving the file may have removed its folder too.
+        mkdirSync(dirname(fullPath), { recursive: true });
         writeFileSync(fullPath, file.before);
         results.push({ path: file.path, action: "restored" });
       }

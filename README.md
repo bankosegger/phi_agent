@@ -201,6 +201,12 @@ phi-agent -p "list the TODOs in src" > todos.md
 
 The exit code is 0 when the task ran, 1 when it failed (an API error, say), 2 without a task, and 130 when cancelled with Ctrl+C.
 
+`--json` (which implies `--print`) writes one JSON line to stdout instead of the plain reply, so a script can read everything at once: `{ "ok": true, "reply": "...", "task": "...", "model": "...", "usage": { "requests": 1, "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "cost": 0.01, "cost_estimated": false }, "changes": ["src/app.js"], "elapsed_ms": 0 }`. On failure `ok` is false and `error` says why; the exit code is unchanged. Tool calls and other chatter still go to stderr, so stdout is only ever the JSON line.
+
+```bash
+phi-agent -p --json "summarize README.md" | jq -r .reply
+```
+
 A tool call that would ask is skipped, and the model is told so, unless a [permissions rule](#permissions) allows it or you add `--yes` (`-y`), which approves everything. `--yes` works in a chat too. Use it in the [Docker sandbox](#docker-sandbox), where commands can't reach the rest of your computer:
 
 ```bash

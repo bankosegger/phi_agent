@@ -11,6 +11,8 @@ Options:
                     a Claude model through the Claude API, like claude-opus-5-5
   --print, -p       Run the task, print the reply and exit: for scripts and CI;
                     a task starting with /name runs your command of that name
+  --json            With --print (which it implies): one JSON line on stdout — the
+                    reply, usage, changed files, and ok/error — instead of plain text
   --yes, -y         Approve every tool call without asking (with --print, or alone)
   --plan            Start in plan mode: the agent only looks around and replies with a plan
   --version, -v     Show the version
@@ -22,6 +24,7 @@ const FLAGS = {
   "--sandbox": "sandbox",
   "--print": "print",
   "-p": "print",
+  "--json": "json",
   "--yes": "yes",
   "-y": "yes",
   "--plan": "plan",
@@ -32,12 +35,12 @@ const FLAGS = {
 };
 
 /**
- * Reads the arguments: { options: { continue, sandbox, print, yes, plan, version, help, model }, task }.
+ * Reads the arguments: { options: { continue, sandbox, print, json, yes, plan, version, help, model }, task }.
  * An argument is an option only if it is one exactly, so a task like "explain -c" (one argument)
  * stays whole. Throws for --model without a model.
  */
 export function parseArgs(argv) {
-  const options = { continue: false, sandbox: false, print: false, yes: false, plan: false, version: false, help: false, model: null };
+  const options = { continue: false, sandbox: false, print: false, json: false, yes: false, plan: false, version: false, help: false, model: null };
   const words = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];

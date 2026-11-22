@@ -130,7 +130,7 @@ if (!IN_SANDBOX && sandboxRequested) {
       agentArgs: cliArgs.filter((arg) => arg !== "--sandbox"),
       // --print only reads input that is piped in. Attaching a terminal would leave the agent
       // in the container waiting for input that the user never types.
-      attachInput: !options.print || !process.stdin.isTTY,
+      attachInput: !HEADLESS || !process.stdin.isTTY,
       info: (text) => console.error(theme.muted(text)),
       warn: (text) => console.error(theme.danger(text)),
     }),
@@ -284,7 +284,7 @@ function canSeeImages() {
 
 // With --print, the agent runs one task without reading the terminal: the reply goes to stdout,
 // and everything else (tool calls, errors, usage) to stderr, so a script gets just the reply.
-const HEADLESS = options.print;
+const HEADLESS = options.print || options.json; // --json implies --print
 const messageOutput = HEADLESS ? process.stderr : output;
 
 const info = (text) => theme.muted(text);
@@ -344,6 +344,11 @@ const replyWriter = createMarkdownWriter({
 // Ends the reply's line in progress, if any, so other output starts on a line of its own.
 function endLine() {
   replyWriter.endLine();
+}
+
+// The usage as fields for --json: token counts by name, and the cost in dollars, if known.
+function usageJson(usage) {
+  return { requests: usage.requests, input_tokens: usage.input, output_tokens: usage.output, cached_tokens: usage.cached, cost: usage.cost, cost_estimated: usage.estimated };
 }
 
 // Prints a line of output, on its own line, in place of the spinner (which comes back after).
@@ -998,6 +1003,7 @@ async function runPrint() {
   const entered = [firstTask, await readPipedInput({ hasTask: Boolean(firstTask) })].filter(Boolean).join("\n\n");
   if (!entered) {
     print(failure("--print needs a task: give it as an argument, or pipe it in."));
+    if (options.json) output.write(`${JSON.stringify({ ok: false, error: "--print needs a task: give it as an argument, or pipe it in." })}\n`);
     return 2;
   }
   // One of the user's own commands runs its prompt, with what was piped in as its arguments.
@@ -1038,10 +1044,17 @@ async function runPrint() {
       onContextChange: showContextChange,
       onNotice: showNotice,
     });
-    if (reply) output.write(reply.endsWith("\n") ? reply : `${reply}\n`);
+    if (options.json) {
+      output.write(`${JSON.stringify({ ok: true, reply, task: entered, model, usage: usageJson(usage), changes: changes.paths, elapsed_ms: Date.now() - startedAt })}\n`);
+    } else if (reply) {
+      output.write(reply.endsWith("\n") ? reply : `${reply}\n`);
+    }
   } catch (error) {
     showError(error, controller.signal);
     exitCode = controller.signal.aborted ? 130 : 1;
+    if (options.json) {
+      output.write(`${JSON.stringify({ ok: false, error: error.message, task: entered, model, usage: usageJson(usage), changes: changes.paths, elapsed_ms: Date.now() - startedAt })}\n`);
+    }
   }
 
   if (changes.paths.length) {

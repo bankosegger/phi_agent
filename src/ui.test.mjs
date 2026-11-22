@@ -1,0 +1,161 @@
+import { describe, expect, it } from "vitest";
+import { stripVTControlCharacters as plain } from "node:util";
+import { LEGACY_GLYPHS, UNICODE_GLYPHS, displayWidth } from "./theme.mjs";
+import {
+  banner,
+  confirmPrompt,
+  detailLines,
+  formatDuration,
+  helpLines,
+  markdownAsText,
+  numberedLines,
+  ruleScope,
+  taskFooter,
+  toolCallLine,
+} from "./ui.mjs";
+
+const g = UNICODE_GLYPHS;
+const lines = (list) => list.map(plain);
+
+describe("toolCallLine", () => {
+  it("names a tool call with a verb and what it is about", () => {
+    expect(plain(toolCallLine("edit_file", "src/a.js", g))).toBe("● Edit src/a.js");
+    expect(plain(toolCallLine("shell", "npm test", g))).toBe("● Run npm test");
+    expect(plain(toolCallLine("read_file", "src/a.js (lines 1-20)", g))).toBe("● Read src/a.js (lines 1-20)");
+    expect(plain(toolCallLine("new_tool", "", g))).toBe("● new_tool");
+  });
+});
+
+describe("detailLines", () => {
+  it("shows a numbered diff under a tool call, with gaps where lines were left out", () => {
+    const diff = [
+      { kind: "same", text: "a", number: 9 },
+      { kind: "remove", text: "b", number: 10 },
+      { kind: "add", text: "B", number: 10 },
+      { kind: "gap", text: "" },
+      { kind: "same", text: "z", number: 120 },
+      { kind: "note", text: "… 3 more lines" },
+    ];
+    expect(lines(detailLines(diff, g))).toEqual(["    9   a", "   10 - b", "   10 + B", "    ⋮", "  120   z", "      … 3 more lines"]);
+  });
+
+  it("shows a command's output, and how it ended", () => {
+    const output = [
+      { kind: "output", text: "1 test failed" },
+      { kind: "error", text: "exit code 1 · 2.5s" },
+    ];
+    expect(lines(detailLines(output, g))).toEqual(["  │ 1 test failed", "  ✗ exit code 1 · 2.5s"]);
+    expect(lines(detailLines([{ kind: "ok", text: "0.4s" }], LEGACY_GLYPHS))).toEqual(["  √ 0.4s"]);
+  });
+});
+
+describe("confirmPrompt", () => {
+  it("asks about the call, offering to allow calls like it for good", () => {
+    expect(plain(confirmPrompt("shell", { cmd: "npm test" }, "shell: npm test", g))).toBe('  ? Run this command? y/N · a = always allow "npm test" › ');
+    expect(plain(confirmPrompt("edit_file", {}, "edit_file", g))).toBe("  ? Make this edit? y/N · a = always allow edits › ");
+    expect(plain(confirmPrompt("fetch_url", {}, "fetch_url: docs.python.org", g))).toBe("  ? Fetch this page? y/N · a = always allow docs.python.org › ");
+    // No rule, no "always": a command like rm always asks.
+    expect(plain(confirmPrompt("shell", { cmd: "rm -rf dist", background: false }, null, g))).toBe("  ? Run this command? y/N › ");
+    expect(plain(confirmPrompt("shell", { background: true }, null, g))).toBe("  ? Start this in the background? y/N › ");
+    // In a narrow terminal, the choices are only named, leaving room for the answer.
+    expect(plain(confirmPrompt("edit_file", {}, "edit_file", g, 50))).toBe("  ? Make this edit? y/N/a › ");
+  });
+
+  it("says what a rule allows", () => {
+    expect(ruleScope("shell: npm run build")).toBe('"npm run build"');
+    expect(ruleScope("fetch_url: nodejs.org")).toBe("nodejs.org");
+    expect(ruleScope("write_file")).toBe("file writes");
+    expect(ruleScope("view_image")).toBe("view_image calls");
+  });
+});
+
+describe("taskFooter", () => {
+  const usage = { requests: 3, input: 9400, output: 291, cost: 0.0016 };
+  const context = { used: 2560, limit: 128_000 };
+
+  it("sums up a task in a rule across the terminal", () => {
+    const footer = plain(taskFooter({ elapsed: 1800, usage, sessionCost: 0.0016, context }, 100, g));
+    expect(footer).toMatch(/^── 1\.8s · 9\.4k in · 291 out · \$0\.0016 · 2% of 128k context ─+$/);
+    expect(displayWidth(footer)).toBe(99); // one short of the terminal, which would add a blank line
+  });
+
+  it("adds the session's cost after the first task, and the context in tokens without a limit", () => {
+    const footer = plain(taskFooter({ elapsed: 65_000, usage, sessionCost: 0.03, context: { used: 2560, limit: null } }, 200, g));
+    expect(footer).toContain("1m 5s · 9.4k in · 291 out · $0.0016 (session $0.03) · 2.6k tokens of context");
+    expect(displayWidth(footer)).toBe(100); // not wider than this, however wide the terminal
+  });
+
+  it("fits a narrow terminal with a shorter version, then with less", () => {
+    expect(plain(taskFooter({ elapsed: 1600, usage, sessionCost: 0.03, context }, 50, g))).toBe("── 1.6s · 9.4k/291 tokens · $0.0016 · 2% context");
+    expect(plain(taskFooter({ elapsed: 1600, usage, sessionCost: 0.03, context }, 30, g))).toBe("── 1.6s · 9.4k/291 tokens ───");
+  });
+
+  it("leaves out what it doesn't know", () => {
+    expect(plain(taskFooter({ elapsed: 300, usage: { requests: 0 } }, 30, g))).toBe(`── 0.3s ${"─".repeat(21)}`);
+  });
+});
+
+describe("banner", () => {
+  const about = { version: "1.0.0", model: "openai/gpt-4o-mini", project: "~/code/app", following: ["AGENTS.md"] };
+
+  it("shows the model, the project and its instructions in a box", () => {
+    const shown = lines(banner(about, 80, g));
+    expect(shown[0]).toMatch(/^╭─+╮$/);
+    expect(shown).toContain(`│ ${"● Tiny Agent v1.0.0".padEnd(displayWidth(shown[0]) - 4)} │`);
+    expect(shown.some((line) => /│ model {4}openai\/gpt-4o-mini +│/.test(line))).toBe(true);
+    expect(shown.some((line) => /│ follows {2}AGENTS\.md +│/.test(line))).toBe(true);
+    expect(shown.at(-1)).toMatch(/^╰─+╯$/);
+    expect(new Set(shown.map(displayWidth)).size).toBe(1); // a straight box
+  });
+
+  it("says when the agent may do more, or less, than usual", () => {
+    const shown = lines(banner({ ...about, sandbox: true, plan: true, yes: true }, 100, g)).join("\n");
+    expect(shown).toContain("sandbox  Docker, with the project at /workspace");
+    expect(shown).toContain("mode     plan: looks around and changes nothing");
+    expect(shown).toContain("approve  everything, without asking (--yes)");
+  });
+
+  it("fits a narrow terminal: no box, and a long path cut in the middle", () => {
+    const shown = lines(banner({ ...about, project: "~/a/very/long/path/to/some/project/folder" }, 36, g));
+    expect(shown[0]).toBe("● Tiny Agent v1.0.0");
+    for (const line of shown) expect(displayWidth(line)).toBeLessThanOrEqual(35);
+    expect(shown.find((line) => line.startsWith("project"))).toMatch(/^project {2}~\/a\/.*….*folder$/);
+  });
+});
+
+describe("helpLines", () => {
+  it("lists the commands, keys and tips in columns that fit the terminal", () => {
+    const shown = lines(helpLines(60, g));
+    expect(shown[0]).toBe("Commands");
+    expect(shown.some((line) => /^ {2}\/resume \[n\] +List the saved conversations/.test(line))).toBe(true);
+    expect(shown).toContain("Keys");
+    expect(shown.some((line) => /^ {2}Ctrl\+C +Cancel the task/.test(line))).toBe(true);
+    expect(shown).toContain("Tips");
+    for (const line of shown) expect(displayWidth(line)).toBeLessThanOrEqual(59);
+  });
+});
+
+describe("markdownAsText", () => {
+  it("leaves out markdown's marks, for a preview", () => {
+    expect(markdownAsText("## **Fixed** the `add` test, see [docs](https://x.org)")).toBe("Fixed the add test, see docs");
+    expect(markdownAsText("snake_case and 2*3*4 stay")).toBe("snake_case and 2*3*4 stay");
+  });
+});
+
+describe("numberedLines", () => {
+  it("numbers items, lining them up", () => {
+    expect(lines(numberedLines(["a", "b"]))).toEqual(["  1  a", "  2  b"]);
+    expect(lines(numberedLines(Array.from({ length: 10 }, (_, i) => `item ${i + 1}`)))[9]).toBe("  10  item 10");
+    expect(lines(numberedLines(Array.from({ length: 10 }, (_, i) => `item ${i + 1}`)))[0]).toBe("   1  item 1");
+  });
+});
+
+describe("formatDuration", () => {
+  it("shows tenths of a second for short times, and minutes and hours for long ones", () => {
+    expect(formatDuration(400)).toBe("0.4s");
+    expect(formatDuration(9_940)).toBe("9.9s");
+    expect(formatDuration(45_000)).toBe("45s");
+    expect(formatDuration(725_000)).toBe("12m 5s");
+    expect(formatDuration(7_380_000)).toBe("2h 3m");
+  });
+});

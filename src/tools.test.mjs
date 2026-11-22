@@ -230,8 +230,8 @@ describe("runTool", () => {
     });
   });
 
-  it("keeps the API key out of commands' environment", async () => {
-    expect(commandEnv({ OPENROUTER_API_KEY: "a", openrouter_api_key: "b", PATH: "/bin" })).toEqual({ PATH: "/bin" });
+  it("keeps the API keys out of commands' environment", async () => {
+    expect(commandEnv({ OPENROUTER_API_KEY: "a", openrouter_api_key: "b", ANTHROPIC_API_KEY: "c", PATH: "/bin" })).toEqual({ PATH: "/bin" });
 
     const saved = process.env.OPENROUTER_API_KEY;
     process.env.OPENROUTER_API_KEY = "sk-secret";

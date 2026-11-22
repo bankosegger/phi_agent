@@ -6,6 +6,7 @@ import {
   confirmPrompt,
   detailLines,
   formatDuration,
+  formatTokens,
   helpLines,
   markdownAsText,
   numberedLines,
@@ -77,6 +78,22 @@ describe("taskFooter", () => {
     const footer = plain(taskFooter({ elapsed: 1800, usage, sessionCost: 0.0016, context }, 100, g));
     expect(footer).toMatch(/^── 1\.8s · 9\.4k in · 291 out · \$0\.0016 · 2% of 128k context ─+$/);
     expect(displayWidth(footer)).toBe(99); // one short of the terminal, which would add a blank line
+  });
+
+  it("counts tokens in thousands, and a million-token window in millions", () => {
+    expect(formatTokens(950)).toBe("950");
+    expect(formatTokens(12_500)).toBe("12.5k");
+    expect(formatTokens(999_900)).toBe("999.9k");
+    expect(formatTokens(999_950)).toBe("1M");
+    expect(formatTokens(1_000_000)).toBe("1M");
+    expect(formatTokens(1_500_000)).toBe("1.5M");
+  });
+
+  it("says how much of the prompt came from the cache, and marks estimated costs", () => {
+    const claude = { requests: 2, input: 52_000, cached: 48_000, output: 900, cost: 0.034, estimated: true };
+    const footer = plain(taskFooter({ elapsed: 4200, usage: claude, sessionCost: 0.1, sessionEstimated: true, context }, 120, g));
+    expect(footer).toContain("4.2s · 52k in (48k cached) · 900 out · ~$0.03 (session ~$0.10) · ");
+    expect(plain(taskFooter({ elapsed: 4200, usage: claude, context }, 50, g))).toBe("── 4.2s · 52k/900 tokens · ~$0.03 · 2% context ──");
   });
 
   it("adds the session's cost after the first task, and the context in tokens without a limit", () => {

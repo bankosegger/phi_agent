@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { claudeRequest, dropThinking, isClaudeModel, streamClaudeReply } from "./claude.mjs";
 import { checkToolCall, runTool, toolsFor } from "./tools.mjs";
 
 const DEFAULT_MAX_TOOL_ROUNDS = 25;
@@ -120,13 +121,19 @@ function toolActivity(call) {
   return { type: "tool", name: call.function.name, path: path == null ? null : unescapeJsonString(path), chars: call.function.arguments.length };
 }
 
+// How a reply from OpenRouter stopped, as requestReply says it: finish_reason "length" means it
+// reached the output limit, and "content_filter" that the provider filtered it.
+const STOPS = { length: "cut_off", content_filter: "refusal" };
+
 async function collectStream(stream, { onToken, onUsage, onActivity }) {
   let content = "";
+  let finish = null;
   const toolCalls = [];
 
   for await (const chunk of stream) {
     // Token counts (and, from OpenRouter, the cost) arrive in a last chunk with no choices.
     if (chunk.usage) onUsage?.(chunk.usage);
+    finish = chunk.choices?.[0]?.finish_reason ?? finish;
 
     const delta = chunk.choices?.[0]?.delta;
     if (!delta) continue;
@@ -148,7 +155,7 @@ async function collectStream(stream, { onToken, onUsage, onActivity }) {
   const message = { role: "assistant", content: content || null };
   const calls = toolCalls.filter(Boolean);
   if (calls.length) message.tool_calls = calls;
-  return message;
+  return { message, stop: STOPS[finish] ?? "done" };
 }
 
 function logToolCall(name, args) {
@@ -161,9 +168,15 @@ function parseArguments(json) {
   return args;
 }
 
+// The last tool call of a reply that reached the model's output limit may be missing the end of
+// its arguments, so it doesn't run.
+const CUT_OFF_REFUSAL =
+  "your reply reached the output limit before this call was complete, so it didn't run. Make the call again with less in it: write a long file in parts, with write_file and then append_file";
+
 // Resolves to { status: "ok" | "error" | "skipped" | "cancelled", content, parts }, where content
 // is what the model is told, and parts (from view_image) are message parts to show it after.
-async function callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode }) {
+// A call that was `cutOff` is only announced.
+async function callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode, cutOff = false }) {
   const cancelled = { status: "cancelled", content: CANCELLED };
   if (signal?.aborted) return cancelled;
 
@@ -174,11 +187,12 @@ async function callTool(call, { confirmTool, onToolCall, onActivity, signal, cha
   } catch (error) {
     // Announce the call anyway (with null args), so its error is not shown as the previous call's.
     onToolCall(name, null);
-    return { status: "error", content: `error: invalid arguments: ${error.message}` };
+    return { status: "error", content: cutOff ? `error: ${CUT_OFF_REFUSAL}` : `error: invalid arguments: ${error.message}` };
   }
 
   try {
     onToolCall(name, args);
+    if (cutOff) return { status: "error", content: `error: ${CUT_OFF_REFUSAL}` };
     if (planMode && !LOOKING_TOOLS.has(name)) return { status: "error", content: `error: ${PLAN_REFUSAL}` };
     // A call that would fail anyway, like an edit of text that isn't in the file, is reported
     // without asking the user to approve it.
@@ -224,29 +238,90 @@ function forModel(messages, canSeeImages) {
   return canSeeImages ? { messages, tools: toolsFor() } : { messages: withoutImages(messages), tools: toolsFor({ images: false }) };
 }
 
-async function requestReply({ openai, model, messages, canSeeImages = true, context, signal, onToken, onUsage, onActivity }) {
+// A request to OpenRouter. Claude caches a prompt only where it is marked, so for Claude models
+// the system prompt is (with the tools before it, the same in every request), and so is the end
+// of the conversation, with the top-level mark, which moves along as the conversation grows:
+// each request reads what the one before it wrote. Other models cache by themselves.
+// `sessionId` keeps a conversation's requests with the provider that has its prompt cached.
+export function openRouterRequest({ model, messages, tools, toolChoice = null, sessionId = null }) {
+  // Content blocks from the Claude API (see claude.mjs) are for the Claude API only.
+  const shown = messages.map((message) => {
+    if (!message.claude) return message;
+    const { claude, ...rest } = message;
+    return rest;
+  });
+  const request = { model, messages: shown, tools, stream: true, stream_options: { include_usage: true } };
+  if (toolChoice) request.tool_choice = toolChoice;
+  if (sessionId) request.session_id = sessionId;
+  if (/^anthropic\//i.test(model)) {
+    request.cache_control = { type: "ephemeral" };
+    const [system, ...rest] = shown;
+    if (system?.role === "system" && typeof system.content === "string") {
+      request.messages = [{ ...system, content: [{ type: "text", text: system.content, cache_control: { type: "ephemeral" } }] }, ...rest];
+    }
+  }
+  return request;
+}
+
+/**
+ * One model request: to the Claude API for a Claude model like claude-opus-5-5 (with the `claude`
+ * client), and otherwise to OpenRouter (with `openai`). Resolves to { message, stop, refusal }:
+ * the reply as an assistant message, and how it stopped: "done", "cut_off" (at the model's
+ * output limit), or "refusal" (the model declined, or its provider filtered the reply).
+ */
+async function requestReply({
+  openai,
+  claude,
+  model,
+  messages,
+  canSeeImages = true,
+  toolChoice = null,
+  context,
+  signal,
+  onToken,
+  onUsage,
+  onActivity,
+  onNotice,
+  sessionId = null,
+  modelInfo = null,
+  effort = null,
+}) {
   onActivity?.({ type: "waiting" });
   const request = forModel(messages, canSeeImages);
-  const stream = await openai.chat.completions.create(
-    { model, ...request, stream: true, stream_options: { include_usage: true } },
-    { signal },
-  );
-  return collectStream(stream, {
-    onToken,
-    onActivity,
-    onUsage: (usage) => {
-      context?.measure(request.messages, usage);
-      onUsage?.(usage);
-    },
-  });
+  const measure = (usage) => {
+    context?.measure(request.messages, usage);
+    onUsage?.(usage);
+  };
+  if (isClaudeModel(model)) {
+    if (!claude) throw new Error(`${model} is a Claude API model, which needs ANTHROPIC_API_KEY to be set.`);
+    return streamClaudeReply({
+      client: claude,
+      request: claudeRequest({ model, ...request, toolChoice, about: modelInfo, effort }),
+      signal,
+      onToken,
+      onToolInput: (call) => onActivity?.(toolActivity(call)),
+      onUsage: measure,
+      onNotice,
+    });
+  }
+  if (!openai) throw new Error(`${model} is an OpenRouter model, which needs OPENROUTER_API_KEY to be set.`);
+  const stream = await openai.chat.completions.create(openRouterRequest({ model, ...request, toolChoice, sessionId }), { signal });
+  return collectStream(stream, { onToken, onActivity, onUsage: measure });
+}
+
+function refusalError(model, refusal) {
+  const why = refusal?.category ? ` (${refusal.category})` : "";
+  return new Error(`${model} declined this request${why}. Rephrase it, or try another model with /model.`);
 }
 
 // Leaves out the oldest messages of a summary request until it fits the context window, a whole
 // turn at a time so that tool calls keep their results. Old tool output is trimmed first, and
 // the summary from an earlier compaction is kept: it stands for everything before it.
+// The request shares its messages with the conversation, so trimming them trims the
+// conversation too, which Claude's thinking no longer matches then.
 function fitSummaryRequest(request, context) {
   if (!context.isFull(request)) return;
-  context.trim(request);
+  if (context.trim(request)) dropThinking(request);
   const first = request[1]?.content?.startsWith?.(SUMMARY_NOTE) ? 2 : 1;
   while (context.isFull(request)) {
     const nextTurn = request.findIndex((message, i) => i > first && message.role === "user");
@@ -258,10 +333,12 @@ function fitSummaryRequest(request, context) {
 /**
  * Has the model summarize messages[1..upTo) (by default, all but the system prompt) and puts the
  * summary in their place. Returns how many messages it replaced. With a ContextWindow as
- * `context`, a conversation too long to summarize whole is shortened first.
+ * `context`, a conversation too long to summarize whole is shortened first. The clients and
+ * settings are those of agentTurn.
  */
 export async function compactMessages({
   openai,
+  claude,
   model = process.env.MODEL || DEFAULT_MODEL,
   messages,
   upTo = messages.length,
@@ -270,22 +347,39 @@ export async function compactMessages({
   signal,
   onToken,
   onUsage,
+  onNotice,
+  sessionId,
+  modelInfo,
+  effort,
 }) {
   if (upTo < 2) return 0;
   const request = [...messages.slice(0, upTo), { role: "user", content: SUMMARY_REQUEST }];
   if (context) fitSummaryRequest(request, context);
 
   // The tools are sent because the history has tool calls, but the model may not call them now.
-  const stream = await openai.chat.completions.create(
-    { model, ...forModel(request, canSeeImages), tool_choice: "none", stream: true, stream_options: { include_usage: true } },
-    { signal },
-  );
-  const reply = await collectStream(stream, { onToken, onUsage });
+  const reply = await requestReply({
+    openai,
+    claude,
+    model,
+    messages: request,
+    canSeeImages,
+    toolChoice: "none",
+    signal,
+    onToken,
+    onUsage,
+    onNotice,
+    sessionId,
+    modelInfo,
+    effort,
+  });
   signal?.throwIfAborted();
+  if (reply.stop === "refusal") throw refusalError(model, reply.refusal);
 
-  const summary = reply.content?.trim();
+  const summary = reply.message.content?.trim();
   if (!summary) throw new Error("the model replied without a summary");
   messages.splice(1, upTo - 1, { role: "user", content: `${SUMMARY_NOTE}\n\n${summary}` });
+  // Claude's thinking in the messages after the summary was about the conversation before it.
+  dropThinking(messages);
   return upTo - 1;
 }
 
@@ -297,8 +391,12 @@ async function makeRoom({ taskStart, overflowed = false, ...options }) {
   const { context, messages, signal, onActivity, onContextChange } = options;
   if (!context?.isFull(messages)) return taskStart;
 
+  // Claude's thinking no longer matches a conversation that was trimmed, so it goes too.
   const trimmed = context.trim(messages);
-  if (trimmed) onContextChange?.({ type: "trimmed", count: trimmed });
+  if (trimmed) {
+    dropThinking(messages);
+    onContextChange?.({ type: "trimmed", count: trimmed });
+  }
 
   if (context.isFull(messages) && taskStart > 2) {
     onActivity?.({ type: "compacting" });
@@ -316,7 +414,10 @@ async function makeRoom({ taskStart, overflowed = false, ...options }) {
 
   if (overflowed && context.isFull(messages)) {
     const count = context.trim(messages, { keepNewest: false });
-    if (count) onContextChange?.({ type: "trimmed", count });
+    if (count) {
+      dropThinking(messages);
+      onContextChange?.({ type: "trimmed", count });
+    }
   }
   return taskStart;
 }
@@ -338,6 +439,12 @@ async function makeRoom({ taskStart, overflowed = false, ...options }) {
  * `canSeeImages` is false, the model gets the view_image tool; if it is false, images earlier in
  * the conversation are left out of requests. In `planMode`, the model is asked for a plan, and
  * only tools that look around run.
+ * A Claude model like claude-opus-5-5 is asked through the Claude API with the `claude` client
+ * (an Anthropic), with `modelInfo` (what fetchClaudeModels says about it) and an `effort` level,
+ * if given; other models through OpenRouter with `openai`, keeping to the provider of
+ * `sessionId`. `onNotice(notice)` hears { type: "cutOff" } when a reply stopped at the model's
+ * output limit, and the notices of streamClaudeReply in claude.mjs. When the model declines a
+ * request, the turn rejects with an error that says so.
  * Aborting `signal` stops the turn and rejects with the signal's reason. Every tool call
  * already in `messages` still gets a result, so the conversation can continue afterwards.
  */
@@ -347,6 +454,7 @@ export async function agentTurn({
   canSeeImages = true,
   planMode = false,
   openai,
+  claude,
   messages,
   confirmTool,
   onToolCall = logToolCall,
@@ -355,43 +463,69 @@ export async function agentTurn({
   onUsage,
   onActivity,
   onContextChange,
+  onNotice,
   changes,
   context,
   signal,
   model = process.env.MODEL || DEFAULT_MODEL,
   maxRounds = Number(process.env.MAX_TOOL_ROUNDS) || DEFAULT_MAX_TOOL_ROUNDS,
+  sessionId = null,
+  modelInfo = null,
+  effort = null,
 }) {
   let taskStart = messages.length;
   const text = planMode ? `${PLAN_NOTE}\n\n${task}` : task;
   messages.push({ role: "user", content: attachments.length ? [{ type: "text", text }, ...attachments] : text });
-  const options = { openai, model, messages, canSeeImages, context, signal, onToken, onUsage, onActivity, onContextChange };
+  const options = {
+    openai,
+    claude,
+    model,
+    messages,
+    canSeeImages,
+    context,
+    signal,
+    onToken,
+    onUsage,
+    onActivity,
+    onContextChange,
+    onNotice,
+    sessionId,
+    modelInfo,
+    effort,
+  };
 
   for (let i = 0; i < maxRounds; i++) {
     signal?.throwIfAborted();
     taskStart = await makeRoom({ ...options, taskStart });
 
-    let message;
+    let reply;
     try {
-      message = await requestReply(options);
+      reply = await requestReply(options);
     } catch (error) {
       // Too long for the model after all: make room in the window the error states, and retry once.
       if (signal?.aborted || !context?.overflowed(error, messages)) throw error;
       taskStart = await makeRoom({ ...options, taskStart, overflowed: true });
-      message = await requestReply(options);
+      reply = await requestReply(options);
     }
-    // The SDK ends an aborted stream quietly instead of throwing; drop the partial reply.
+    // The OpenAI SDK ends an aborted stream quietly instead of throwing; drop the partial reply.
     signal?.throwIfAborted();
+    // What the model wrote before it declined is left out of the conversation.
+    if (reply.stop === "refusal") throw refusalError(model, reply.refusal);
+    const { message } = reply;
     messages.push(message);
 
     if (!message.tool_calls) {
+      if (reply.stop === "cut_off") onNotice?.({ type: "cutOff" });
       return message.content ?? "";
     }
 
     // Images that tools opened follow the results, since a tool result can only be text and
     // nothing may come between a tool call and its result.
     const parts = [];
+    const last = message.tool_calls.at(-1);
     for (const call of message.tool_calls) {
-      const result = await callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode });
+      const cutOff = reply.stop === "cut_off" && call === last;
+      const result = await callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode, cutOff });
       messages.push({ role: "tool", tool_call_id: call.id, content: result.content });
       if (result.parts) parts.push(...result.parts);
       onToolResult?.(call.function.name, result);

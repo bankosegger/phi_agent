@@ -124,6 +124,13 @@ describe("ContextWindow", () => {
     expect(messages[2].tool_calls[0].function.arguments).toBe("{}");
   });
 
+  it("doesn't count the content blocks of Claude API replies, which repeat their text and calls", () => {
+    const context = new ContextWindow();
+    const reply = { role: "assistant", content: "x".repeat(3000) };
+    const withBlocks = { ...reply, claude: { content: [{ type: "thinking", signature: "s".repeat(500) }, { type: "text", text: reply.content }] } };
+    expect(context.estimate([system, withBlocks])).toBe(context.estimate([system, reply]));
+  });
+
   it("knows when a request was too long, and how large the window is", () => {
     const errors = [
       ["400 This endpoint's maximum context length is 131072 tokens. However, you requested about 140000 tokens", 131_072],
@@ -182,5 +189,10 @@ describe("fetchModels", () => {
     expect(modelInfo(models, "vendor/small:free").images).toBe(false);
     expect(modelInfo(models, "vendor/typo")).toBe(null);
     expect(modelInfo(null, "openai/gpt-4o-mini")).toBe(null);
+
+    // A Claude model's alias is the model the list has with its date.
+    const claude = new Map([["claude-haiku-4-5-20251001", { contextLength: 200_000 }]]);
+    expect(modelInfo(claude, "claude-haiku-4-5").contextLength).toBe(200_000);
+    expect(modelInfo(claude, "claude-haiku-4")).toBe(null);
   });
 });

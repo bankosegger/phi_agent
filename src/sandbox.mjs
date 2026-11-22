@@ -11,7 +11,7 @@ import { USER_DIR } from "./agent-core.mjs";
 export const SANDBOX_IMAGE = "phi-agent-sandbox";
 const SOURCE_LABEL = "phi-agent.source";
 // Settings the agent takes from its .env or the environment, passed on into the sandbox.
-const PASSED_ENV = ["OPENROUTER_API_KEY", "MODEL", "MAX_TOOL_ROUNDS"];
+const PASSED_ENV = ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "MODEL", "MAX_TOOL_ROUNDS", "EFFORT"];
 
 /** The files the image is built from (as .dockerignore lets in), relative to `agentDir`. */
 export function imageFiles(agentDir) {

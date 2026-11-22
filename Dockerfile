@@ -1,6 +1,6 @@
 # The Docker sandbox the agent runs in when started with --sandbox (see the README).
-# It has Node, npm and git, and the project is mounted at /workspace. The OpenRouter key isn't
-# part of the image: it is passed in from the agent's .env when the container starts.
+# It has Node, npm and git, and the project is mounted at /workspace. The API keys aren't part
+# of the image: they are passed in from the agent's .env when the container starts.
 FROM node:24-slim
 
 # The project comes from the host, so its owner may not be the container's user: let git work

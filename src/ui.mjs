@@ -13,12 +13,16 @@ export function nameList(names, max = 5) {
   return names.length > max ? `${shown} and ${names.length - max} more` : shown;
 }
 
+// "950", "12.5k", "1M"
 export function formatTokens(count) {
-  return count < 1000 ? String(count) : `${(count / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  if (count < 1000) return String(count);
+  if (count < 999_950) return `${(count / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  return `${(count / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
 }
 
-export function formatCost(dollars) {
-  return `$${dollars.toFixed(dollars < 0.01 ? 4 : 2)}`;
+// "$0.12", or "~$0.12" for an estimate.
+export function formatCost(dollars, estimated = false) {
+  return `${estimated ? "~" : ""}$${dollars.toFixed(dollars < 0.01 ? 4 : 2)}`;
 }
 
 // "0.4s", "45s", "12m 5s", "2h 3m"
@@ -130,17 +134,23 @@ export function confirmPrompt(name, args, rule, g = defaultGlyphs, columns = 80)
 }
 
 /**
- * The line after a task: how long it took, its tokens and cost, and how full the model's
- * context is, in a rule across the terminal. A narrow terminal gets a shorter version.
+ * The line after a task: how long it took, its tokens (and how many of those came from the
+ * prompt cache) and cost, and how full the model's context is, in a rule across the terminal. A
+ * narrow terminal gets a shorter version. Costs worked out from list prices (`usage.estimated`,
+ * and `sessionEstimated` for the session's) are marked as estimates.
  */
-export function taskFooter({ elapsed, usage, sessionCost = 0, context = {} }, columns, g = defaultGlyphs) {
+export function taskFooter({ elapsed, usage, sessionCost = 0, sessionEstimated = false, context = {} }, columns, g = defaultGlyphs) {
   const parts = (short) => {
     const list = [];
     if (elapsed != null) list.push(formatDuration(elapsed));
     if (usage?.requests) {
       const tokens = [formatTokens(usage.input), formatTokens(usage.output)];
-      list.push(short ? `${tokens.join("/")} tokens` : `${tokens[0]} in · ${tokens[1]} out`);
-      if (usage.cost != null) list.push(!short && sessionCost > usage.cost ? `${formatCost(usage.cost)} (session ${formatCost(sessionCost)})` : formatCost(usage.cost));
+      const cached = usage.cached ? ` (${formatTokens(usage.cached)} cached)` : "";
+      list.push(short ? `${tokens.join("/")} tokens` : `${tokens[0]} in${cached} · ${tokens[1]} out`);
+      if (usage.cost != null) {
+        const cost = formatCost(usage.cost, usage.estimated);
+        list.push(!short && sessionCost > usage.cost ? `${cost} (session ${formatCost(sessionCost, sessionEstimated)})` : cost);
+      }
     }
     if (context.used != null) {
       const percent = context.limit ? `${Math.round((100 * context.used) / context.limit)}%` : null;
@@ -196,7 +206,7 @@ const COMMANDS = [
   ["/compact", "", "Summarize the conversation so far, to free up the model's context"],
   ["/undo", "", "Revert the file changes of the last task (again for the task before)"],
   ["/plan", "", "Plan mode on or off: the agent only looks around and replies with a plan"],
-  ["/model", "[name]", "Show the model, or switch to another OpenRouter model"],
+  ["/model", "[name]", "Show the model, or switch to another: an OpenRouter model, or a Claude model like claude-opus-5-5"],
   ["/processes", "", "List the commands the agent left running in the background"],
   ["/stop", "<n|all>", "Stop background process n, or all of them"],
   ["/permissions", "", "List what runs without asking (/permissions remove <n> takes one back)"],

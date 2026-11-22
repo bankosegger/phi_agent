@@ -1,6 +1,8 @@
 #!/usr/bin/env node
+import Anthropic from "@anthropic-ai/sdk";
 import dotenv from "dotenv";
 import OpenAI from "openai";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, sep } from "node:path";
@@ -17,6 +19,7 @@ import {
   readUserInstructions,
 } from "./src/agent-core.mjs";
 import { FileChanges } from "./src/changes.mjs";
+import { DEFAULT_CLAUDE_MODEL, EFFORTS, dropThinking, fetchClaudeModels, isClaudeModel } from "./src/claude.mjs";
 import { USAGE, parseArgs } from "./src/cli-args.mjs";
 import { ContextWindow, fetchModels, isOverflowError, modelInfo } from "./src/context.mjs";
 import { imagePart, imagePathsIn } from "./src/images.mjs";
@@ -68,8 +71,34 @@ if (options.help) {
   process.exit(0);
 }
 
-if (!process.env.OPENROUTER_API_KEY) {
-  console.error(theme.danger(`OPENROUTER_API_KEY is not set. Add it to ${ENV_FILE} or to your environment.`));
+// OpenRouter's key is for the models it has, like openai/gpt-4o-mini; Anthropic's for Claude
+// models through the Claude API, like claude-opus-5-5. Either will do, or both.
+if (!process.env.OPENROUTER_API_KEY && !process.env.ANTHROPIC_API_KEY) {
+  console.error(
+    theme.danger(
+      `Neither OPENROUTER_API_KEY nor ANTHROPIC_API_KEY is set. Add one to ${ENV_FILE} or to your environment: OpenRouter's for its models, Anthropic's for Claude models through the Claude API.`,
+    ),
+  );
+  process.exit(1);
+}
+
+const openai = process.env.OPENROUTER_API_KEY ? new OpenAI({ baseURL: "https://openrouter.ai/api/v1", apiKey: process.env.OPENROUTER_API_KEY }) : null;
+const claude = process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
+
+// Why a model can't be used, for want of its API key, or null.
+function keyProblem(name) {
+  if (isClaudeModel(name) && !claude) {
+    return `${name} is a Claude API model: it needs ANTHROPIC_API_KEY in .env. Through OpenRouter, Claude models start with anthropic/.`;
+  }
+  if (!isClaudeModel(name) && !openai) {
+    return `${name} is an OpenRouter model: it needs OPENROUTER_API_KEY in .env. Claude API models start with claude-, like ${DEFAULT_CLAUDE_MODEL}.`;
+  }
+  return null;
+}
+
+let model = options.model || process.env.MODEL || (openai ? DEFAULT_MODEL : DEFAULT_CLAUDE_MODEL);
+if (keyProblem(model)) {
+  console.error(theme.danger(keyProblem(model)));
   process.exit(1);
 }
 
@@ -91,6 +120,13 @@ if (!IN_SANDBOX && sandboxRequested) {
       warn: (text) => console.error(theme.danger(text)),
     }),
   );
+}
+
+// EFFORT in .env: how much Claude models think through the Claude API, from low to max. Unset,
+// each model thinks as much as it does by default.
+const effort = EFFORTS.find((level) => level === process.env.EFFORT?.trim().toLowerCase()) ?? null;
+if (process.env.EFFORT?.trim() && !effort) {
+  console.error(theme.warning(`${glyphs.warn} EFFORT=${process.env.EFFORT} isn't a level Claude knows (${EFFORTS.join(", ")}), so each model uses its default.`));
 }
 
 const VERSION = (() => {
@@ -118,15 +154,15 @@ for (const [signal, code] of [
   process.on(signal, () => process.exit(code));
 }
 
-const openai = new OpenAI({
-  baseURL: "https://openrouter.ai/api/v1",
-  apiKey: process.env.OPENROUTER_API_KEY,
-});
-
-let model = options.model || process.env.MODEL || DEFAULT_MODEL;
 let messages;
 const context = new ContextWindow();
-let models = null; // what OpenRouter's model list says about each model, once it is in
+// What the model lists say about each model (OpenRouter's, and the Claude API's), once one is
+// in, and which of the two are: "openrouter", "claude".
+let models = null;
+const listed = new Set();
+
+// Requests of a conversation through OpenRouter go to the provider that has its prompt cached.
+let sessionId = randomUUID();
 
 // The conversation's saved file and what the list of saved conversations shows about it:
 // { file, created, title, lastTask, tasks }. Null until it is first saved.
@@ -141,6 +177,7 @@ function newConversation() {
   messages = createMessages({ instructions, userInstructions, sandbox: IN_SANDBOX });
   context.reset();
   session = null;
+  sessionId = randomUUID();
   return [instructions != null && INSTRUCTIONS_FILE, userInstructions != null && `~/${USER_DIR}/${INSTRUCTIONS_FILE}`].filter(Boolean);
 }
 
@@ -169,10 +206,12 @@ function saveConversation(task) {
 }
 
 // Continues a saved conversation, which is saved to its own file from now on. Its system prompt
-// is written afresh, since the project's AGENTS.md may have changed.
+// is written afresh, since the project's AGENTS.md may have changed, so Claude's thinking from
+// before no longer matches the conversation.
 function resumeConversation(saved) {
   newConversation();
   messages.push(...saved.messages.slice(1));
+  dropThinking(messages);
   const { file, created, title, lastTask, tasks } = saved;
   session = { file, created, title, lastTask, tasks: tasks ?? 0 };
 }
@@ -205,16 +244,26 @@ function showResumed(saved) {
   }
 }
 
-// The model list loads in the background. Until it has (or if it can't), the context window
-// is assumed to be 128k tokens and the usage line shows the context in tokens, not percent,
-// and the model is assumed to see images.
-fetchModels(openai).then(
-  (list) => {
-    models = list;
-    context.limit = modelInfo(models, model)?.contextLength ?? null;
-  },
-  () => {},
-);
+// The model lists load in the background. Until the model's has (or if it can't), the context
+// window is assumed to be 128k tokens and the usage line shows the context in tokens, not
+// percent, and the model is assumed to see images.
+function loadModels(source, fetchList) {
+  fetchList().then(
+    (list) => {
+      models = new Map([...(models ?? []), ...list]);
+      listed.add(source);
+      context.limit = modelInfo(models, model)?.contextLength ?? null;
+    },
+    () => {},
+  );
+}
+if (openai) loadModels("openrouter", () => fetchModels(openai));
+if (claude) loadModels("claude", () => fetchClaudeModels(claude));
+
+// What the model list says about the model, for requests.
+function aboutModel() {
+  return modelInfo(models, model);
+}
 
 function canSeeImages() {
   return modelInfo(models, model)?.images !== false;
@@ -383,6 +432,21 @@ function showContextChange(change) {
   print(CONTEXT_CHANGES[change.type](change));
 }
 
+// What happened to a reply along the way (see agentTurn and streamClaudeReply).
+const NOTICES = {
+  cutOff: () => info(`The reply stopped at the model's output limit. Say "continue" for the rest.`),
+  fallback: ({ from, to, category }) => warning(`${from ?? "The model"} declined this${category ? ` (${category})` : ""}, so ${to ?? "another model"} took over.`),
+  retry: ({ error }) => warning(`The reply broke off (${error.message}), so the agent asks again.`),
+};
+
+function showNotice(notice) {
+  const line = NOTICES[notice.type]?.(notice);
+  if (!line) return;
+  status.stop();
+  startBlock("info");
+  print(line);
+}
+
 // The terminal's bell, which can flash the window or mark its tab, rings when the agent needs
 // the user after working for a while, since they may have turned to something else: at a
 // confirmation, or at the end of a long task. BELL=off in .env silences it.
@@ -473,24 +537,35 @@ function permissions(argument) {
 // The file changes of each task that changed files, newest last, for /undo.
 const undoStack = [];
 let sessionCost = 0;
+let sessionEstimated = false;
 
 function newUsage() {
-  return { requests: 0, input: 0, output: 0, cost: null };
+  return { requests: 0, input: 0, output: 0, cached: 0, cost: null, estimated: false };
 }
 
 function addUsage(total, usage) {
   total.requests++;
   total.input += usage.prompt_tokens ?? 0;
   total.output += usage.completion_tokens ?? 0;
-  // OpenRouter reports what the request cost; other providers may not.
-  if (typeof usage.cost === "number") total.cost = (total.cost ?? 0) + usage.cost;
+  total.cached += usage.prompt_tokens_details?.cached_tokens ?? 0;
+  // OpenRouter reports what the request cost; for the Claude API, it is estimated from list prices.
+  if (typeof usage.cost === "number") {
+    total.cost = (total.cost ?? 0) + usage.cost;
+    if (usage.cost_estimated) total.estimated = true;
+  }
 }
 
 // After a task or /compact: how long it took, what it cost, and how full the model's context is.
 function showFooter(usage, startedAt) {
   sessionCost += usage.cost ?? 0;
+  if (usage.estimated) sessionEstimated = true;
   startBlock("info");
-  print(taskFooter({ elapsed: Date.now() - startedAt, usage, sessionCost, context }, messageOutput.columns));
+  print(taskFooter({ elapsed: Date.now() - startedAt, usage, sessionCost, sessionEstimated, context }, messageOutput.columns));
+}
+
+// How the agent reaches the model, for agentTurn and compactMessages.
+function modelOptions() {
+  return { openai, claude, model, sessionId, modelInfo: aboutModel(), effort, canSeeImages: canSeeImages() };
 }
 
 function showError(error, signal) {
@@ -533,13 +608,11 @@ async function runTask(task) {
 
   try {
     const reply = await agentTurn({
+      ...modelOptions(),
       task,
       attachments,
-      canSeeImages: canSeeImages(),
       planMode,
-      openai,
       messages,
-      model,
       changes,
       context,
       confirmTool,
@@ -556,6 +629,7 @@ async function runTask(task) {
       },
       onActivity: showActivity,
       onContextChange: showContextChange,
+      onNotice: showNotice,
     });
     // Replies arrive through onToken, so only print here if nothing was streamed.
     if (!streamed && reply) {
@@ -628,14 +702,13 @@ async function compact() {
   showActivity({ type: "compacting" });
   try {
     await compactMessages({
-      openai,
-      model,
+      ...modelOptions(),
       messages,
-      canSeeImages: canSeeImages(),
       context,
       signal: controller.signal,
       onUsage: (requestUsage) => addUsage(usage, requestUsage),
       onToken: (token) => writeToken(token, theme.muted),
+      onNotice: showNotice,
     });
     endLine();
     context.reset();
@@ -696,33 +769,41 @@ async function stopProcesses(argument) {
   messages.push({ role: "user", content: `(I stopped background ${running.length === 1 ? "process" : "processes"} ${names}.)` });
 }
 
-// "128k tokens of context · sees images", as far as OpenRouter's model list says.
+// "Claude API · 1M tokens of context · sees images", as far as the model's list says.
 function modelDetails() {
-  const about = modelInfo(models, model);
-  const details = [];
+  const about = aboutModel();
+  const details = [isClaudeModel(model) ? "Claude API" : "OpenRouter"];
   if (about?.contextLength) details.push(`${formatTokens(about.contextLength)} tokens of context`);
   if (about?.images != null) details.push(about.images ? "sees images" : "text only");
   return details.join(" · ");
 }
 
-// Warnings about the model: one OpenRouter doesn't list, or one that can't call tools.
+// Warnings about the model: one its list doesn't have, or one that can't call tools.
 function modelWarning() {
-  if (!models) return null;
-  const about = modelInfo(models, model);
+  const claudeModel = isClaudeModel(model);
+  if (!listed.has(claudeModel ? "claude" : "openrouter")) return null;
+  const about = aboutModel();
+  if (!about && claudeModel) return `${model} isn't in the Claude API's model list. /model and Tab list the ones there are.`;
   if (!about) return `${model} isn't in OpenRouter's model list; check the name at openrouter.ai/models.`;
   if (about.tools === false) return `${model} can't call tools, so it can only talk: it can't read or change files, or run commands.`;
   return null;
 }
 
 function showModel() {
-  const details = modelDetails();
-  print(`${theme.accent(glyphs.tool)} ${theme.strong(model)}${details ? info(`  ${details}`) : ""}`);
+  print(`${theme.accent(glyphs.tool)} ${theme.strong(model)}${info(`  ${modelDetails()}`)}`);
   const problem = modelWarning();
   if (problem) print(warning(problem));
-  print(info("Switch with /model <name>, using a model ID from openrouter.ai/models (Tab completes them)."));
+  if (openai && claude) print(info(`Switch with /model <name>: an OpenRouter model ID, or a Claude model like ${DEFAULT_CLAUDE_MODEL}.`));
+  else if (claude) print(info(`Switch with /model <name>, using a Claude model like ${DEFAULT_CLAUDE_MODEL} (Tab completes them).`));
+  else print(info("Switch with /model <name>, using a model ID from openrouter.ai/models (Tab completes them)."));
 }
 
 function switchModel(name) {
+  const missing = keyProblem(name);
+  if (missing) {
+    print(warning(missing));
+    return;
+  }
   model = name;
   context.limit = modelInfo(models, model)?.contextLength ?? null;
   const details = modelDetails();
@@ -888,13 +969,11 @@ async function runPrint() {
 
   try {
     const reply = await agentTurn({
+      ...modelOptions(),
       task,
       attachments: taskImages(task),
-      canSeeImages: canSeeImages(),
       planMode,
-      openai,
       messages,
-      model,
       changes,
       context,
       confirmTool,
@@ -911,6 +990,7 @@ async function runPrint() {
       onToolResult: showToolResult,
       onUsage: (requestUsage) => addUsage(usage, requestUsage),
       onContextChange: showContextChange,
+      onNotice: showNotice,
     });
     if (reply) output.write(reply.endsWith("\n") ? reply : `${reply}\n`);
   } catch (error) {

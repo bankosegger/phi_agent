@@ -74,6 +74,12 @@ describe("dockerRunArgs", () => {
     ]);
   });
 
+  it("passes on the Anthropic key and the effort setting, by name", () => {
+    const args = dockerRunArgs({ projectDir: "/p", env: { ANTHROPIC_API_KEY: "sk-ant-secret", EFFORT: "high", MODEL: "claude-opus-5-5" } });
+    expect(args.join(" ")).toContain("--env ANTHROPIC_API_KEY --env MODEL --env EFFORT");
+    expect(args.join(" ")).not.toContain("sk-ant-secret");
+  });
+
   it("mounts the user's ~/.phi-agent read-only, where the agent looks for it", () => {
     const args = dockerRunArgs({ projectDir: "/p", userDir: "/home/me/.phi-agent" });
     expect(args).toContain("type=bind,source=/home/me/.phi-agent,target=/home/agent/.phi-agent,readonly");

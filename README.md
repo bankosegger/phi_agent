@@ -9,13 +9,16 @@ npm install
 cp .env.example .env # or create .env manually
 ```
 
-Add your OpenRouter key to `.env`. The agent always reads the `.env` next to `agent.mjs`, whichever folder you run it in:
+Add an API key to `.env`: an [OpenRouter](https://openrouter.ai) key for the models it has, from many providers, an Anthropic key for Claude models through the Claude API, or both (see [Models](#models)). The agent always reads the `.env` next to `agent.mjs`, whichever folder you run it in:
 
 ```env
 OPENROUTER_API_KEY=your_key_here
+# ANTHROPIC_API_KEY=your_anthropic_key_here
 MODEL=openai/gpt-4o-mini
 # Optional: model requests per task before the agent stops (default 25)
 # MAX_TOOL_ROUNDS=25
+# Optional: how much Claude models think through the Claude API: low, medium, high, xhigh or max
+# EFFORT=high
 # Optional: always run in the Docker sandbox, as with --sandbox
 # SANDBOX=docker
 ```
@@ -73,8 +76,8 @@ In the sandbox:
 - The project folder is mounted at `/workspace`, so the agent's changes land in your files as usual and `/undo` works the same. Nothing else on your computer is visible.
 - The project's `.git` is read-only, so nothing in the sandbox can rewrite your history or add a git hook that would later run on your computer. You commit, outside the sandbox.
 - A Node project gets its own `node_modules` in a Docker volume, so packages installed there are built for Linux and yours stay as they are. The agent runs `npm install` when it needs to. If the project had no `node_modules` folder, Docker leaves an empty one as the volume's mount point.
-- Commands run on Linux with `/bin/sh`, and Node, npm and git are installed. The container has network access, which the agent needs to reach OpenRouter.
-- The OpenRouter key is passed in from your `.env` when the container starts; it isn't stored in the image. The commands the agent runs don't get it in their environment, but one set on finding it could still read it from the agent's process, so a key with a credit limit is a good idea.
+- Commands run on Linux with `/bin/sh`, and Node, npm and git are installed. The container has network access, which the agent needs to reach OpenRouter and the Claude API.
+- The API keys are passed in from your `.env` when the container starts; they aren't stored in the image. The commands the agent runs don't get them in their environment, but one set on finding them could still read them from the agent's process, so keys with a spending limit are a good idea.
 
 The sandbox protects your computer from the commands the agent runs. It doesn't make the code the agent writes safe to run: review the changes before you run them outside.
 
@@ -86,6 +89,26 @@ If the project has an `AGENTS.md` file, the agent follows it. Put in it what you
 
 For what applies to all your projects, like how you like answers or what your machine has installed, write an `AGENTS.md` in a `.phi-agent` folder in your home folder (`~/.phi-agent/AGENTS.md`). The agent follows both; where they disagree, the project's wins. In the Docker sandbox, the folder is mounted read-only, so the agent reads it there too.
 
+## Models
+
+The model's ID says which service the agent asks:
+
+- An ID with a slash, like `openai/gpt-4o-mini` or `anthropic/claude-sonnet-4.5`, is a model on [OpenRouter](https://openrouter.ai/models), used with `OPENROUTER_API_KEY`. OpenRouter reports what each request cost.
+- An ID that starts with `claude-`, like `claude-opus-5-5`, is a Claude model through Anthropic's Claude API, used with `ANTHROPIC_API_KEY`, which you get in the [Claude Console](https://platform.claude.com). The Claude API is billed per token to that account: a Claude Pro or Max subscription doesn't cover it.
+
+`MODEL` in `.env` sets the model, and `--model` overrides it. Without either, the model is `openai/gpt-4o-mini` when there is an OpenRouter key, and `claude-opus-5-5` when there is only an Anthropic one. `/model <id>` switches to any model whose key is set, and Tab completes the IDs of both services.
+
+### Claude through the Claude API
+
+- Claude thinks before it answers, as much as the task needs. Its thinking goes back to it with the rest of the conversation, so it keeps its train of thought across tool calls. `EFFORT` in `.env` (`low`, `medium`, `high`, `xhigh` or `max`) sets how much it thinks; without it, each model thinks as much as it does by default (`medium` for Claude Opus 5.5). More effort is slower and costs more, as thinking is billed as output.
+- The system prompt and the conversation are cached: each request reads what the request before it sent from the cache, at a tenth of the usual price or less, instead of paying for the whole conversation again. The usage line after a task says how much of its input came from the cache.
+- When a model declines a request for safety reasons, which its classifiers can do for legitimate security work too, its fallback model takes over, and the agent says so. If there is no fallback model, or it declines too, the task stops with an error.
+- The Claude API doesn't report what a request cost, so the usage line shows an estimate from Anthropic's list prices, marked `~`. For a model the agent has no prices for, it shows no cost.
+
+### Claude through OpenRouter
+
+With an `anthropic/` model on OpenRouter, the agent marks the prompt for caching, as Claude needs; other models cache by themselves. All of a conversation's requests go to the same provider, which has its prompt cached.
+
 ## Commands
 
 | Input | Effect |
@@ -96,7 +119,7 @@ For what applies to all your projects, like how you like answers or what your ma
 | `/compact` | Summarize the conversation so far, to free up the model's context |
 | `/undo` | Revert the file changes of the last task; run it again for the task before |
 | `/plan` | Turn plan mode on or off (see [Plan mode](#plan-mode)) |
-| `/model [name]` | Show the model, its context size and whether it sees images, or switch to another [OpenRouter model](https://openrouter.ai/models) |
+| `/model [name]` | Show the model, its context size and whether it sees images, or switch to another (see [Models](#models)) |
 | `/processes` | List the commands the agent left running in the background |
 | `/stop <n>`, `/stop all` | Stop background process n, or all of them |
 | `/permissions` | List what runs without asking; `/permissions remove <n>` takes one back |
@@ -123,7 +146,9 @@ Replies are formatted as they stream in, when the terminal shows colors: heading
 
 The old Windows console can't draw some of the symbols the agent uses, like `✓` and `❯`, so there it uses simpler ones. Windows Terminal and VS Code show them all.
 
-After each task, the agent lists the files it changed, then draws a line across the terminal with how long the task took, how many tokens it used with the cost that OpenRouter reports, and how full the model's context window is.
+After each task, the agent lists the files it changed, then draws a line across the terminal with how long the task took, how many tokens it used (and how many of them were read from the prompt cache), what it cost, and how full the model's context window is. The cost is OpenRouter's, or for the Claude API an estimate, marked `~`.
+
+When a reply stops at the model's output limit, the agent says so. A tool call the limit cut off doesn't run: the model is told to make it again, in smaller parts.
 
 ### Undo
 
@@ -174,7 +199,7 @@ The conversation is saved as usual, so `--continue` can pick it up afterwards.
 
 ### Long conversations
 
-Every request sends the whole conversation, so it grows with each task. The agent keeps it inside the model's context window, whose size it gets from OpenRouter's model list (for a model that isn't listed, it assumes 128k tokens). When a request would fill three quarters of the window, the agent first removes old tool output, which the model can fetch again if it needs it. If that isn't enough, it has the model summarize the earlier tasks. `/compact` does that whenever you like, which also makes later requests cheaper.
+Every request sends the whole conversation, so it grows with each task. The agent keeps it inside the model's context window, whose size it gets from the model list of OpenRouter or the Claude API (for a model that isn't listed, it assumes 128k tokens). When a request would fill three quarters of the window, the agent first removes old tool output, which the model can fetch again if it needs it. If that isn't enough, it has the model summarize the earlier tasks. `/compact` does that whenever you like, which also makes later requests cheaper.
 
 If a request is too long for the model anyway, the agent shortens it to fit the window the error states and tries once more.
 
@@ -182,7 +207,7 @@ If a request is too long for the model anyway, the agent shortens it to fit the 
 
 To show the model a screenshot, put the image's path in your message: drag the file into the terminal, which types its full path, or write `@` and a path in the project, like `@docs/mockup.png`. The agent attaches PNG, JPEG, GIF and WebP images up to 5 MB, and says which ones it attached. The model can also open images in the project itself, with `view_image`.
 
-Both need a model that can see images. `/model` says whether yours can, from OpenRouter's model list; with one that can't, the model gets only the file names. In the Docker sandbox, only images inside the project can be attached.
+Both need a model that can see images. `/model` says whether yours can, from its model list; with one that can't, the model gets only the file names. In the Docker sandbox, only images inside the project can be attached.
 
 ### Background processes
 
@@ -229,7 +254,7 @@ Commands, file changes and web requests ask before they run, unless a [permissio
 
 File tools are limited to relative paths inside the project. Absolute paths and `..` traversal are blocked.
 
-Commands the agent runs don't get your OpenRouter key in their environment, so a command that prints its environment doesn't put the key into the conversation.
+Commands the agent runs don't get your API keys in their environment, so a command that prints its environment doesn't put a key into the conversation.
 
 New files can't be created at the project root, so the agent puts them in a folder like `src/` instead of next to `package.json`. Existing root files, like `package.json` or `.gitignore`, can be edited. The file tools can't change anything inside `.git`.
 

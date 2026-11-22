@@ -30,9 +30,14 @@ export function isOverflowError(error) {
   return OVERFLOW.test(String(error?.message ?? ""));
 }
 
-// The length of a message (or messages) as JSON, counting each image as IMAGE_CHARS.
+// The length of a message (or messages) as JSON, counting each image as IMAGE_CHARS. The content
+// blocks a reply from the Claude API keeps (see claude.mjs) repeat its text and tool calls, so
+// they don't count.
 function size(value) {
-  return JSON.stringify(value, (key, part) => (key === "url" && typeof part === "string" && part.startsWith("data:") ? IMAGE_STAND_IN : part)).length;
+  return JSON.stringify(value, (key, part) => {
+    if (key === "claude") return undefined;
+    return key === "url" && typeof part === "string" && part.startsWith("data:") ? IMAGE_STAND_IN : part;
+  }).length;
 }
 
 // Characters in a request: the messages as JSON, plus the tool definitions sent with them.
@@ -161,7 +166,16 @@ export async function fetchModels(openai) {
   return models;
 }
 
-/** A model's entry from fetchModels, or null. Variants like :free are their model's. */
+/**
+ * A model's entry from fetchModels (or fetchClaudeModels), or null. Variants like :free are their
+ * model's, and an alias like claude-haiku-4-5 is the entry with its date, claude-haiku-4-5-20251001.
+ */
 export function modelInfo(models, model) {
-  return models?.get(model) ?? models?.get(model.replace(/:[^/:]*$/, "")) ?? null;
+  if (!models || !model) return null;
+  const found = models.get(model) ?? models.get(model.replace(/:[^/:]*$/, ""));
+  if (found) return found;
+  for (const [id, about] of models) {
+    if (id.startsWith(`${model}-`) && /^\d{8}$/.test(id.slice(model.length + 1))) return about;
+  }
+  return null;
 }

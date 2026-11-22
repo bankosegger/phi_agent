@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chdir, cwd } from "node:process";
@@ -8,11 +8,14 @@ import { FileChanges } from "./changes.mjs";
 import { ContextWindow } from "./context.mjs";
 
 // Like the real SDK, the fake stream just ends (no error) once its request signal is aborted.
-// A { usage } item becomes the final chunk that reports token usage.
+// A { usage } item becomes the final chunk that reports token usage, and a { finish } item the
+// chunk that says why the reply ended.
 async function* streamOf(deltas, signal) {
   for (const delta of deltas) {
     if (signal?.aborted) return;
-    yield delta.usage ? { choices: [], usage: delta.usage } : { choices: [{ delta }] };
+    if (delta.usage) yield { choices: [], usage: delta.usage };
+    else if (delta.finish) yield { choices: [{ delta: {}, finish_reason: delta.finish }] };
+    else yield { choices: [{ delta }] };
   }
 }
 
@@ -249,6 +252,90 @@ describe("agentTurn", () => {
 
       expect(changes.paths).toEqual(["src/a.txt"]);
     });
+  });
+
+  it("says when a reply stopped at the output limit, and doesn't run the call it cut off", async () => {
+    await inTempDir(async () => {
+      const openai = fakeOpenai([
+        [toolCallDelta(0, "list_dir", {}), { tool_calls: [{ index: 1, id: "2", function: { name: "write_file", arguments: '{"path":"src/a.js","content":"le' } }] }, { finish: "length" }],
+        [{ content: "Here is the start" }, { finish: "length" }],
+      ]);
+      const messages = createMessages();
+      const notices = [];
+      const results = [];
+
+      const reply = await agentTurn({
+        task: "write a.js",
+        openai,
+        messages,
+        confirmTool: async () => true,
+        onToolCall: () => {},
+        onToolResult: (name, result) => results.push([name, result.status]),
+        onNotice: (notice) => notices.push(notice),
+      });
+
+      expect(reply).toBe("Here is the start");
+      expect(results).toEqual([
+        ["list_dir", "ok"],
+        ["write_file", "error"],
+      ]);
+      expect(messages.find((m) => m.tool_call_id === "2").content).toMatch(/^error: your reply reached the output limit before this call was complete, so it didn't run/);
+      expect(existsSync("src/a.js")).toBe(false);
+      expect(notices).toEqual([{ type: "cutOff" }]);
+    });
+  });
+
+  it("doesn't run the last call of a cut-off reply even when its arguments look whole", async () => {
+    await inTempDir(async () => {
+      // The file's content may be cut short, though the JSON around it closed.
+      const openai = fakeOpenai([[toolCallDelta(0, "write_file", { path: "src/a.js", content: "line 1\n" }), { finish: "length" }], [{ content: "ok" }]]);
+      const messages = createMessages();
+      await agentTurn({ task: "write a.js", openai, messages, confirmTool: async () => true, onToolCall: () => {} });
+      expect(messages.find((m) => m.role === "tool").content).toMatch(/^error: your reply reached the output limit/);
+      expect(existsSync("src/a.js")).toBe(false);
+    });
+  });
+
+  it("rejects when the provider filtered the reply, leaving it out of the conversation", async () => {
+    const openai = fakeOpenai([[{ content: "Sure" }, { finish: "content_filter" }]]);
+    const messages = createMessages();
+    await expect(agentTurn({ task: "test", openai, messages, confirmTool: async () => true, model: "test/model" })).rejects.toThrow(
+      "test/model declined this request. Rephrase it, or try another model with /model.",
+    );
+    expect(messages.map((m) => m.role)).toEqual(["system", "user"]);
+  });
+});
+
+describe("agentTurn through OpenRouter", () => {
+  it("marks Claude's prompt for caching, and keeps a conversation with one provider", async () => {
+    const openai = fakeOpenai([[{ content: "hi" }], [{ content: "hi" }]]);
+    const messages = createMessages({ instructions: null, userInstructions: null });
+    const [system] = messages;
+
+    await agentTurn({ task: "test", openai, messages, confirmTool: async () => true, model: "anthropic/claude-opus-4.5", sessionId: "s-1" });
+    const [request] = openai.bodies;
+    expect(request.cache_control).toEqual({ type: "ephemeral" });
+    expect(request.messages[0]).toEqual({ role: "system", content: [{ type: "text", text: system.content, cache_control: { type: "ephemeral" } }] });
+    expect(request.session_id).toBe("s-1");
+    // The conversation itself is left as it is.
+    expect(messages[0]).toBe(system);
+
+    // Other models cache by themselves.
+    await agentTurn({ task: "test", openai, messages, confirmTool: async () => true, model: "openai/gpt-4o-mini" });
+    expect(openai.bodies[1]).not.toHaveProperty("cache_control");
+    expect(openai.bodies[1].messages[0]).toEqual(system);
+  });
+
+  it("leaves out the content blocks replies from the Claude API keep", async () => {
+    const openai = fakeOpenai([[{ content: "ok" }]]);
+    const messages = [
+      ...createMessages({ instructions: null }),
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "Hello.", claude: { content: [{ type: "thinking", thinking: "", signature: "s" }, { type: "text", text: "Hello." }] } },
+    ];
+    await agentTurn({ task: "next", openai, messages, confirmTool: async () => true });
+    expect(openai.bodies[0].messages[2]).toEqual({ role: "assistant", content: "Hello." });
+    expect(messages[2].claude).toBeDefined();
   });
 });
 

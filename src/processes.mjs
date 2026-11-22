@@ -13,12 +13,15 @@ const STOP_WAIT_MS = 2000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// The environment for the model's commands: the agent's, without its API key, which commands
-// don't need and which would otherwise end up in the conversation if one printed it.
+// The agent's API keys, which commands don't need and which would otherwise end up in the
+// conversation if one printed them.
+const API_KEYS = new Set(["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"]);
+
+// The environment for the model's commands: the agent's, without its API keys.
 export function commandEnv(env = process.env) {
   const result = { ...env };
   for (const name of Object.keys(result)) {
-    if (name.toUpperCase() === "OPENROUTER_API_KEY") delete result[name];
+    if (API_KEYS.has(name.toUpperCase())) delete result[name];
   }
   return result;
 }

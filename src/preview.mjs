@@ -208,6 +208,17 @@ export function previewToolCall(name, args) {
     return { summary: String(args.query ?? ""), lines: [] };
   }
 
+  // The to-do list, a step a line, ticked off as the model goes. (It may be malformed: the call
+  // shows before it is checked.)
+  if (name === "todo_write") {
+    const todos = Array.isArray(args.todos) ? args.todos.filter((todo) => todo && typeof todo === "object") : [];
+    const done = todos.filter((todo) => todo.status === "completed").length;
+    return {
+      summary: todos.length ? `${done} of ${todos.length} done` : "cleared",
+      lines: todos.map((todo) => ({ kind: "todo", status: todo.status, text: clip(String(todo.content ?? "").trim()) })),
+    };
+  }
+
   if (name === "process_output") {
     return { summary: `process ${args.id}${Number(args.wait) > 0 ? ` (waits up to ${args.wait}s)` : ""}`, lines: [] };
   }

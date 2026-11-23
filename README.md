@@ -193,6 +193,8 @@ When you skip a tool call, the model is told not to retry it and to ask you inst
 
 While the agent works, a spinner shows what it is waiting on and for how long: the model, a file the model is writing, or a running command. After a few seconds, it also says how to cancel.
 
+For a task of several steps, the model keeps a to-do list with `todo_write`: you see it when the model writes it, and again each time a step starts (`→`) or is done (`✓`). While the model works on a step, the spinner says which, like `Step 2 of 5: Add tests for the parser`. The list changes nothing, so it works in plan mode too.
+
 Replies are formatted as they stream in, when the terminal shows colors: headings, bold, italic and struck-out text, lists, quotes, and tables drawn in a box. Code blocks are colored by language (JavaScript and TypeScript, Python, shell and PowerShell, JSON, YAML, TOML, SQL, Go, Rust, C-like languages, and diffs), and links show their text with the address after it. Piped output, and `--print`, keep the model's markdown as it is.
 
 The old Windows console can't draw some of the symbols the agent uses, like `✓` and `❯`, so there it uses simpler ones. Windows Terminal and VS Code show them all.
@@ -301,6 +303,7 @@ In the Docker sandbox, a server the agent starts can only be reached inside the 
 | `shell` | Run a shell command. It is stopped after 120 seconds, or up to 600 if the model asks for more, unless it runs in the background | yes |
 | `process_output` | Read what a background process printed since the last read | no |
 | `stop_process` | Stop a background process | no |
+| `todo_write` | Keep a to-do list for a task of several steps, which you see ticked off as the agent goes | no |
 
 `list_dir`, `find_files` and `grep` skip `node_modules`, `.git` and `.agent`. In a git repository they also skip what git ignores, like `dist/` or `.env`, so results stay about your source. `list_dir` names the ignored entries it left out, and naming an ignored folder as the `path` searches it anyway. `grep` also leaves out files that may hold secrets (see [Safety](#safety)), unless one is its `path`.
 

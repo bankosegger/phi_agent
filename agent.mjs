@@ -419,7 +419,7 @@ function runningText({ name, args }) {
 let toolStartedAt = 0;
 
 function activityText(activity) {
-  if (activity.type === "waiting") return "Thinking";
+  if (activity.type === "waiting") return currentStep ?? "Thinking";
   if (activity.type === "compacting") return "Summarizing the conversation to free up context";
   if (activity.type === "running") return runningText(activity);
   // A tool call streaming in, like the content of a file the model is writing.
@@ -436,8 +436,19 @@ function showActivity(activity) {
   status.set(activityText(activity));
 }
 
+// The step of the model's to-do list (see todo_write) it is working on, like "Step 2 of 5: Add
+// tests", which the spinner shows while it waits on the model. Each task starts without one.
+let currentStep = null;
+
+function followTodos(args) {
+  const todos = Array.isArray(args?.todos) ? args.todos : [];
+  const index = todos.findIndex((todo) => todo?.status === "in_progress");
+  currentStep = index >= 0 ? `Step ${index + 1} of ${todos.length}: ${String(todos[index].content ?? "").trim()}` : null;
+}
+
 function showToolCall(name, args) {
   status.stop();
+  if (name === "todo_write") followTodos(args);
   const { summary, lines } = previewToolCall(name, args);
   startBlock(lines.length ? "details" : "tool");
   print(toolCallLine(name, summary));
@@ -672,6 +683,7 @@ async function runTask(task, { title = task, model: taskModel = model } = {}) {
   const usage = newUsage();
   const saved = [];
   lastBlock = "none";
+  currentStep = null;
   const attachments = taskAttachments(task, taskModel);
   activeTask = controller;
   taskStartedAt = Date.now();

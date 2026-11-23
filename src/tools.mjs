@@ -39,6 +39,8 @@ const GIT_COMMANDS = ["status", "diff", "log"];
 const GIT_LOG_DEFAULT = 20;
 const GIT_LOG_MAX = 100;
 const SEARCH_IGNORED_FOLDER = "Naming a folder git ignores, like dist, searches it anyway.";
+const TODO_STATUSES = ["pending", "in_progress", "completed"];
+const MAX_TODOS = 30;
 
 export const tools = [
   {
@@ -321,7 +323,59 @@ export const tools = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "todo_write",
+      description:
+        "Keep a to-do list for a task of several steps, which the user sees as you go. Write the whole list each time: first with every step pending, then again whenever a step starts (in_progress, one at a time) or is done (completed, right away, not all at the end). Add steps you find along the way. Not for a task of one or two steps.",
+      parameters: {
+        type: "object",
+        properties: {
+          todos: {
+            type: "array",
+            description: "The whole list, in order",
+            items: {
+              type: "object",
+              properties: {
+                content: { type: "string", description: 'One step, like "Add tests for the parser"' },
+                status: { type: "string", enum: TODO_STATUSES },
+              },
+              required: ["content", "status"],
+            },
+          },
+        },
+        required: ["todos"],
+      },
+    },
+  },
 ];
+
+/**
+ * The to-do list of a todo_write call, as [{ content, status }]. Throws if it isn't one: each
+ * item needs its content, and a status of pending, in_progress or completed.
+ */
+export function todoList(args) {
+  const todos = args?.todos;
+  if (!Array.isArray(todos)) throw new Error("todos must be a list of { content, status }");
+  if (todos.length > MAX_TODOS) throw new Error(`a to-do list has at most ${MAX_TODOS} steps: make them bigger`);
+  return todos.map((todo, i) => {
+    const content = typeof todo?.content === "string" ? todo.content.trim() : "";
+    if (!content) throw new Error(`todos[${i}] needs its content: the step to do`);
+    if (!TODO_STATUSES.includes(todo.status)) throw new Error(`todos[${i}].status must be one of ${TODO_STATUSES.join(", ")}`);
+    return { content, status: todo.status };
+  });
+}
+
+// What todo_write tells the model: how far along the list is.
+function updatedTodos(args) {
+  const todos = todoList(args);
+  if (!todos.length) return "The to-do list is cleared.";
+  const count = (status) => todos.filter((todo) => todo.status === status).length;
+  const active = count("in_progress");
+  const note = active > 1 ? ` ${active} steps are in progress: work on one at a time, and mark the others pending.` : "";
+  return `The to-do list is updated: ${count("completed")} of ${todos.length} done${active ? `, ${active} in progress` : ""}.${note}`;
+}
 
 /** The tools for a model: without view_image if it can't see images. */
 export function toolsFor({ images = true } = {}) {
@@ -1077,6 +1131,7 @@ const CHECKS = {
   web_search: (args) => {
     if (!String(args?.query ?? "").trim()) throw new Error("query must not be empty");
   },
+  todo_write: todoList,
 };
 
 // Throws if a tool call that needs confirmation would fail anyway, like an edit whose
@@ -1130,6 +1185,11 @@ export async function runTool(name, args, { signal, changes } = {}) {
 
   if (name === "web_search") {
     return webSearch(requireString(args, "query"), { maxResults: args.max_results, signal });
+  }
+
+  // The list itself is for the user, who sees it as the call comes in (see preview.mjs).
+  if (name === "todo_write") {
+    return updatedTodos(args);
   }
 
   // Models often send "" or null for "the project root".

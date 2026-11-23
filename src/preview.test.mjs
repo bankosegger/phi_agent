@@ -32,6 +32,26 @@ describe("diffLines", () => {
 });
 
 describe("previewToolCall", () => {
+  it("shows a to-do list a step a line, with how many are done", () => {
+    const todos = [
+      { content: "Read the parser", status: "completed" },
+      { content: "Add tests", status: "in_progress" },
+      { content: "Fix the bug", status: "pending" },
+    ];
+    expect(previewToolCall("todo_write", { todos })).toEqual({
+      summary: "1 of 3 done",
+      lines: [
+        { kind: "todo", status: "completed", text: "Read the parser" },
+        { kind: "todo", status: "in_progress", text: "Add tests" },
+        { kind: "todo", status: "pending", text: "Fix the bug" },
+      ],
+    });
+    expect(previewToolCall("todo_write", { todos: [] })).toEqual({ summary: "cleared", lines: [] });
+    // A list that isn't one still shows, before the call is refused.
+    expect(previewToolCall("todo_write", { todos: "all of it" })).toEqual({ summary: "cleared", lines: [] });
+    expect(previewToolCall("todo_write", { todos: [null, { status: "pending" }] }).lines).toEqual([{ kind: "todo", status: "pending", text: "" }]);
+  });
+
   it("shows an edit as removed and added lines", () => {
     expect(previewToolCall("edit_file", { path: "src/a.js", old_string: "a\nb", new_string: "c\n" })).toEqual({
       summary: "src/a.js",

@@ -375,6 +375,23 @@ describe("agentTurn plan mode", () => {
       expect(readFileSync("notes.txt", "utf8")).toBe("old\n");
     });
   });
+
+  it("keeps a to-do list, which changes nothing", async () => {
+    const todos = [{ content: "Change notes.txt", status: "pending" }];
+    const openai = fakeOpenai([[toolCallDelta(0, "todo_write", { todos })], [{ content: "Plan: change notes.txt." }]]);
+    const results = [];
+
+    await agentTurn({
+      task: "plan it",
+      planMode: true,
+      openai,
+      messages: createMessages({ instructions: null, userInstructions: null }),
+      confirmTool: async () => true,
+      onToolCall: () => {},
+      onToolResult: (name, { status, content }) => results.push([name, status, content]),
+    });
+    expect(results).toEqual([["todo_write", "ok", "The to-do list is updated: 0 of 1 done."]]);
+  });
 });
 
 describe("agentTurn images", () => {

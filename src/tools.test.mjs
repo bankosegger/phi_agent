@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { chdir, cwd } from "node:process";
 import { commandEnv } from "./processes.mjs";
-import { checkToolCall, globToRegExp, isSecretFile, needsConfirmation, runTool, safeProjectPath, shellTimeout, toolsFor } from "./tools.mjs";
+import { checkToolCall, globToRegExp, isSecretFile, needsConfirmation, runTool, safeProjectPath, shellTimeout, todoList, toolsFor } from "./tools.mjs";
 
 // Whether process `pid` has ended, waiting up to 3 seconds for it. A killed process whose parent
 // was killed too is a zombie until the system reaps it, which kill(pid, 0) still finds; on
@@ -647,6 +647,31 @@ describe("globToRegExp", () => {
     expect(matches("a(1)+.js", "a(1)+.js")).toBe(true);
     expect(matches("a.js", "abjs")).toBe(false);
     expect(() => globToRegExp("{a,b")).toThrow("unclosed {");
+  });
+});
+
+describe("todo_write", () => {
+  const todos = [
+    { content: "Read the parser", status: "completed" },
+    { content: "  Add tests  ", status: "in_progress" },
+    { content: "Fix the bug", status: "pending" },
+  ];
+
+  it("checks the list and says how far along it is, without asking", async () => {
+    expect(needsConfirmation("todo_write", { todos })).toBe(false);
+    expect(todoList({ todos })[1]).toEqual({ content: "Add tests", status: "in_progress" });
+    expect(await runTool("todo_write", { todos })).toBe("The to-do list is updated: 1 of 3 done, 1 in progress.");
+    expect(await runTool("todo_write", { todos: [] })).toBe("The to-do list is cleared.");
+    // One step at a time.
+    const two = todos.map((todo) => ({ ...todo, status: "in_progress" }));
+    expect(await runTool("todo_write", { todos: two })).toMatch(/^The to-do list is updated: 0 of 3 done, 3 in progress\. 3 steps are in progress: work on one at a time/);
+  });
+
+  it("refuses a list that isn't one, before it runs", () => {
+    expect(() => checkToolCall("todo_write", {})).toThrow("todos must be a list of { content, status }");
+    expect(() => checkToolCall("todo_write", { todos: [{ content: "x", status: "done" }] })).toThrow("todos[0].status must be one of pending, in_progress, completed");
+    expect(() => checkToolCall("todo_write", { todos: [{ status: "pending" }] })).toThrow("todos[0] needs its content");
+    expect(() => checkToolCall("todo_write", { todos: Array.from({ length: 31 }, () => ({ content: "x", status: "pending" })) })).toThrow("at most 30 steps");
   });
 });
 

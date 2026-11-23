@@ -51,6 +51,16 @@ describe("detailLines", () => {
     expect(lines(detailLines(output, g))).toEqual(["  │ 1 test failed", "  ✗ exit code 1 · 2.5s"]);
     expect(lines(detailLines([{ kind: "ok", text: "0.4s" }], LEGACY_GLYPHS))).toEqual(["  √ 0.4s"]);
   });
+
+  it("shows a to-do list: what is done, being done, and to do", () => {
+    const todos = [
+      { kind: "todo", status: "completed", text: "Read the parser" },
+      { kind: "todo", status: "in_progress", text: "Add tests" },
+      { kind: "todo", status: "pending", text: "Fix the bug" },
+    ];
+    expect(lines(detailLines(todos, g))).toEqual(["  ✓ Read the parser", "  → Add tests", "  ○ Fix the bug"]);
+    expect(plain(toolCallLine("todo_write", "1 of 3 done", g))).toBe("● To-dos 1 of 3 done");
+  });
 });
 
 describe("confirmPrompt", () => {

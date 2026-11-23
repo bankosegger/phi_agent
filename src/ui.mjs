@@ -59,6 +59,7 @@ export const TOOL_LABELS = {
   write_asset: "Save",
   delete_file: "Delete",
   move_file: "Move",
+  todo_write: "To-dos",
 };
 
 // Tools that only look around. Their calls are shown quietly; calls that change things stand out.
@@ -90,6 +91,10 @@ export function detailLines(lines, g = defaultGlyphs) {
     if (line.kind === "output") return `${INDENT}${theme.muted(`${g.gutter} ${line.text}`)}`;
     if (line.kind === "error") return `${INDENT}${theme.danger(`${g.fail} ${line.text}`)}`;
     if (line.kind === "ok") return `${INDENT}${theme.success(g.ok)} ${theme.muted(line.text)}`;
+    // A step of a to-do list: done, being done, or to do.
+    if (line.kind === "todo" && line.status === "completed") return `${INDENT}${theme.success(g.ok)} ${theme.muted(line.text)}`;
+    if (line.kind === "todo" && line.status === "in_progress") return `${INDENT}${theme.accent(g.arrow)} ${theme.strong(line.text)}`;
+    if (line.kind === "todo") return `${INDENT}${theme.muted(g.skip)} ${line.text}`;
     return `${INDENT}${textColumn}${theme.muted(line.text)}`;
   });
 }

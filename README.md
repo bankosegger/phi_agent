@@ -132,11 +132,14 @@ With an `anthropic/` model on OpenRouter, the agent marks the prompt for caching
 
 ### Your own commands
 
-A Markdown file `.phi-agent/commands/<name>.md` in the project (which git can share) or in `~/.phi-agent/commands` (for all your projects) is a command you run with `/<name>`, like `/review src/app.js`. Where both have one of the same name, the project's wins. A file can start with a one-line description, which `/help` shows:
+A Markdown file `.phi-agent/commands/<name>.md` in the project (which git can share) or in `~/.phi-agent/commands` (for all your projects) is a command you run with `/<name>`, like `/review src/app.js`. Where both have one of the same name, the project's wins. A file can start with a one-line description, which `/help` shows, and the model to run the command with, if not the one in use:
 
     ---
     description: Review the changes for bugs
+    model: claude-opus-5-5
     ---
+
+The model is for that one task: a cheap one for a quick `/summarize`, say, or a stronger one for `/review`. The conversation carries on with the model in use, and `/help <name>` says which model a command runs with. If the model's API key isn't set, the command runs with the model in use, and the agent says why.
 
 `$ARGUMENTS` in the prompt stands for what you write after the command; without it, what follows goes after the prompt. With `--print`, a piped-in message can start with one of your commands too. A command name that doesn't exist suggests the closest one, yours or a built-in. A `.md` file that can't be a command — a built-in's name, an invalid name, no prompt in it, or shadowed by the project's file of the same name — is skipped, and `/help` says which, and why.
 

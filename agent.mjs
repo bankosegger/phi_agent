@@ -275,13 +275,13 @@ function loadModels(source, fetchList) {
 if (openai) loadModels("openrouter", () => fetchModels(openai));
 if (claude) loadModels("claude", () => fetchClaudeModels(claude));
 
-// What the model list says about the model, for requests.
-function aboutModel() {
-  return modelInfo(models, model);
+// What the model list says about a model (by default, the one in use), for requests.
+function aboutModel(name = model) {
+  return modelInfo(models, name);
 }
 
-function canSeeImages() {
-  return modelInfo(models, model)?.images !== false;
+function canSeeImages(name = model) {
+  return modelInfo(models, name)?.images !== false;
 }
 
 // With --print, the agent runs one task without reading the terminal: the reply goes to stdout,
@@ -587,9 +587,9 @@ function showFooter(usage, startedAt) {
   print(taskFooter({ elapsed: Date.now() - startedAt, usage, sessionCost, sessionEstimated, context }, messageOutput.columns));
 }
 
-// How the agent reaches the model, for agentTurn and compactMessages.
-function modelOptions() {
-  return { openai, claude, model, sessionId, modelInfo: aboutModel(), effort, canSeeImages: canSeeImages() };
+// How the agent reaches a model (by default, the one in use), for agentTurn and compactMessages.
+function modelOptions(name = model) {
+  return { openai, claude, model: name, sessionId, modelInfo: aboutModel(name), effort, canSeeImages: canSeeImages(name) };
 }
 
 function showError(error, signal) {
@@ -599,10 +599,11 @@ function showError(error, signal) {
   if (isOverflowError(error)) print(info("  The conversation is too long for this model. /compact summarizes it; /clear starts over."));
 }
 
-// The files a task names, as message parts: its images (see taskImages), and its @-mentioned
-// text files (see mentionParts), saying which were attached and which were left out.
-function taskAttachments(task) {
-  const parts = taskImages(task);
+// The files a task for `name` (a model) names, as message parts: its images (see taskImages),
+// and its @-mentioned text files (see mentionParts), saying which were attached and which were
+// left out.
+function taskAttachments(task, name = model) {
+  const parts = taskImages(task, name);
   const mentions = mentionParts(task);
   for (const part of mentions.parts) {
     parts.push({ type: "text", text: part.text });
@@ -612,12 +613,13 @@ function taskAttachments(task) {
   return parts;
 }
 
-// The images a task names (see imagePathsIn), as message parts, saying which were attached.
-function taskImages(task) {
+// The images a task for `name` (a model) names (see imagePathsIn), as message parts, saying
+// which were attached.
+function taskImages(task, name = model) {
   const paths = imagePathsIn(task);
   if (!paths.length) return [];
-  if (!canSeeImages()) {
-    print(warning(`${model} can't see images, so the model only gets their names. /model switches to one that can.`));
+  if (!canSeeImages(name)) {
+    print(warning(`${name} can't see images, so the model only gets their names. /model switches to one that can.`));
     return [];
   }
   const parts = [];
@@ -633,21 +635,24 @@ function taskImages(task) {
 }
 
 // Runs a task. `title`, if given, is what the user entered for it, like "/review src", which
-// stands for it in the list of saved conversations.
-async function runTask(task, { title = task } = {}) {
+// stands for it in the list of saved conversations. `taskModel`, if given, is the model for
+// this task only, like the one a command's file names; the context window is that model's while
+// it runs.
+async function runTask(task, { title = task, model: taskModel = model } = {}) {
   const controller = new AbortController();
   const changes = new FileChanges();
   const usage = newUsage();
   const saved = [];
   lastBlock = "none";
-  const attachments = taskAttachments(task);
+  const attachments = taskAttachments(task, taskModel);
   activeTask = controller;
   taskStartedAt = Date.now();
   let streamed = false;
+  if (taskModel !== model) context.limit = aboutModel(taskModel)?.contextLength ?? null;
 
   try {
     const reply = await agentTurn({
-      ...modelOptions(),
+      ...modelOptions(taskModel),
       task,
       attachments,
       planMode,
@@ -682,6 +687,7 @@ async function runTask(task, { title = task } = {}) {
     activeTask = null;
     status.stop();
     endLine();
+    if (taskModel !== model) context.limit = aboutModel()?.contextLength ?? null;
   }
 
   const changed = changes.paths;
@@ -817,15 +823,31 @@ function modelDetails() {
   return details.join(" · ");
 }
 
-// Warnings about the model: one its list doesn't have, or one that can't call tools.
-function modelWarning() {
-  const claudeModel = isClaudeModel(model);
+// Warnings about a model (by default, the one in use): one its list doesn't have, or one that
+// can't call tools.
+function modelWarning(name = model) {
+  const claudeModel = isClaudeModel(name);
   if (!listed.has(claudeModel ? "claude" : "openrouter")) return null;
-  const about = aboutModel();
-  if (!about && claudeModel) return `${model} isn't in the Claude API's model list. /model and Tab list the ones there are.`;
-  if (!about) return `${model} isn't in OpenRouter's model list; check the name at openrouter.ai/models.`;
-  if (about.tools === false) return `${model} can't call tools, so it can only talk: it can't read or change files, or run commands.`;
+  const about = aboutModel(name);
+  if (!about && claudeModel) return `${name} isn't in the Claude API's model list. /model and Tab list the ones there are.`;
+  if (!about) return `${name} isn't in OpenRouter's model list; check the name at openrouter.ai/models.`;
+  if (about.tools === false) return `${name} can't call tools, so it can only talk: it can't read or change files, or run commands.`;
   return null;
+}
+
+// The model one of the user's commands runs with: the one its file names, if any, unless that
+// one's API key isn't set; then the one in use, saying why. Warns about a model its list
+// doesn't have.
+function commandModel(command) {
+  if (!command.model || command.model === model) return model;
+  const missing = keyProblem(command.model);
+  if (missing) {
+    print(warning(`${missing} So /${command.name} runs with ${model}.`));
+    return model;
+  }
+  const problem = modelWarning(command.model);
+  if (problem) print(warning(problem));
+  return command.model;
 }
 
 function showModel() {
@@ -1073,9 +1095,14 @@ async function runPrint() {
     if (options.json) output.write(`${JSON.stringify({ ok: false, error: "--print needs a task: give it as an argument, or pipe it in." })}\n`);
     return 2;
   }
-  // One of the user's own commands runs its prompt, with what was piped in as its arguments.
+  // One of the user's own commands runs its prompt, with what was piped in as its arguments, and
+  // with the model its file names, if any: for this one task, that is the model.
   const own = findCommand(entered, customCommands());
   const task = own ? commandTask(own.command, own.args) : entered;
+  if (own) {
+    model = commandModel(own.command);
+    context.limit = aboutModel()?.contextLength ?? null;
+  }
 
   const controller = new AbortController();
   // Ctrl+C cancels the task, stopping the request or command it is waiting on; twice quits.
@@ -1154,8 +1181,10 @@ async function handleInput(line) {
   const own = findCommand(line, customCommands());
   if (own) {
     print();
-    print(info(`${glyphs.arrow} /${own.command.name}, from ${commandPath(own.command)}`));
-    await runTask(commandTask(own.command, own.args), { title: line });
+    const taskModel = commandModel(own.command);
+    const using = taskModel === model ? "" : `, with ${taskModel}`;
+    print(info(`${glyphs.arrow} /${own.command.name}, from ${commandPath(own.command)}${using}`));
+    await runTask(commandTask(own.command, own.args), { title: line, model: taskModel });
     print();
     return true;
   }

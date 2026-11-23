@@ -292,9 +292,13 @@ export function helpLines(columns, g = defaultGlyphs, custom = [], skipped = [])
   ];
 }
 
-/** The /help <name> text, as lines: one of the user's own commands (see commands.mjs) in full. */
-export function commandLines({ name, description, prompt }, file) {
-  return [theme.accent(`/${name}`) + (description ? `  ${theme.muted(description)}` : ""), theme.muted(`from ${file}`), "", ...prompt.split("\n")];
+/**
+ * The /help <name> text, as lines: one of the user's own commands (see commands.mjs) in full,
+ * with the model it runs with, if its file names one.
+ */
+export function commandLines({ name, description, prompt, model = null }, file) {
+  const from = `from ${file}${model ? ` · runs with ${model}` : ""}`;
+  return [theme.accent(`/${name}`) + (description ? `  ${theme.muted(description)}` : ""), theme.muted(from), "", ...prompt.split("\n")];
 }
 
 /** A line of markdown as plain text, for a preview: "## **Fixed** `add`" is "Fixed add". */

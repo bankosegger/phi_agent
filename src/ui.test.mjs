@@ -187,6 +187,11 @@ describe("commandLines", () => {
     const shown = lines(commandLines({ name: "explain", description: "", prompt: "Explain $ARGUMENTS" }, "~/.phi-agent/commands/explain.md"));
     expect(shown).toEqual(["/explain", "from ~/.phi-agent/commands/explain.md", "", "Explain $ARGUMENTS"]);
   });
+
+  it("says which model the command runs with, when its file names one", () => {
+    const shown = lines(commandLines({ name: "summary", description: "Sum up", prompt: "Sum up the diff.", model: "claude-haiku-5-5" }, ".phi-agent/commands/summary.md"));
+    expect(shown[1]).toBe("from .phi-agent/commands/summary.md · runs with claude-haiku-5-5");
+  });
 });
 
 describe("markdownAsText", () => {

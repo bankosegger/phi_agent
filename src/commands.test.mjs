@@ -20,14 +20,26 @@ function folders({ project = {}, home = {} }) {
 
 describe("parseCommand", () => {
   it("reads a description from the front matter, or else the first line", () => {
-    expect(parseCommand("---\ndescription: Review the changes\n---\nLook at git diff.\n")).toEqual({ prompt: "Look at git diff.", description: "Review the changes" });
-    expect(parseCommand('---\r\ndescription: "Quoted"\r\n---\r\n\r\nText')).toEqual({ prompt: "Text", description: "Quoted" });
+    expect(parseCommand("---\ndescription: Review the changes\n---\nLook at git diff.\n")).toEqual({ prompt: "Look at git diff.", description: "Review the changes", model: null });
+    expect(parseCommand('---\r\ndescription: "Quoted"\r\n---\r\n\r\nText')).toEqual({ prompt: "Text", description: "Quoted", model: null });
     expect(parseCommand("\n# Fix the tests\n\nRun npm test, then fix what fails.")).toEqual({
       prompt: "# Fix the tests\n\nRun npm test, then fix what fails.",
       description: "Fix the tests",
+      model: null,
     });
     expect(parseCommand(`${"x".repeat(80)}`).description).toBe(`${"x".repeat(59)}…`);
     expect(parseCommand("---\ntitle: no description\n---\n").prompt).toBe("");
+  });
+
+  it("reads the model to run the command with, if its front matter names one", () => {
+    const text = "---\nDescription: Sum up the diff\nmodel:  'claude-haiku-5-5' \n---\nSum up git diff.";
+    expect(parseCommand(text)).toEqual({ prompt: "Sum up git diff.", description: "Sum up the diff", model: "claude-haiku-5-5" });
+    expect(parseCommand("---\nmodel: openai/gpt-4o-mini\n---\nGo.").model).toBe("openai/gpt-4o-mini");
+    // A model ID has no spaces, and an empty one is none.
+    expect(parseCommand("---\nmodel: the fast one\n---\nGo.").model).toBeNull();
+    expect(parseCommand("---\nmodel:\n---\nGo.").model).toBeNull();
+    // "model:" in the prompt, outside the front matter, is just text.
+    expect(parseCommand("model: claude-haiku-5-5\nGo.").model).toBeNull();
   });
 });
 

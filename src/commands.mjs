@@ -6,10 +6,12 @@ import { USER_DIR } from "./agent-core.mjs";
 // Your own slash commands: a prompt in a Markdown file, which /name runs as a task. A project's
 // commands are in its .phi-agent/commands folder, which git can share; your own, for all your
 // projects, are in ~/.phi-agent/commands. Where both have one of the same name, the project's
-// wins. A file can start with a description for /help:
+// wins. A file can start with a description for /help, and the model to run the command with,
+// if not the one in use:
 //
 //   ---
 //   description: Review the changes for bugs
+//   model: claude-opus-5-5
 //   ---
 //   Review the uncommitted changes ...
 //
@@ -20,27 +22,44 @@ export const COMMANDS_FOLDER = "commands";
 const NAME = /^[a-z0-9][a-z0-9_-]*$/;
 const MAX_DESCRIPTION = 60;
 
-/** The command a file holds: its prompt, and its description (or else its first line). */
+// The front matter's "name: value" lines, as { name: value }, names in lower case and values
+// without the quotes around them.
+function frontMatterFields(text) {
+  const fields = {};
+  for (const line of text.split("\n")) {
+    const field = line.match(/^([a-z][\w-]*)\s*:\s*(.*?)\s*$/i);
+    if (field) fields[field[1].toLowerCase()] = field[2].replace(/^(["'])(.*)\1$/, "$2").trim();
+  }
+  return fields;
+}
+
+/**
+ * The command a file holds: its prompt, its description (or else its first line), and the
+ * model to run it with, or null for the one in use.
+ */
 export function parseCommand(text) {
   let body = text.replaceAll("\r\n", "\n");
-  let description = null;
+  let fields = {};
   const front = body.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
   if (front) {
     body = body.slice(front[0].length);
-    description = front[1].match(/^description:\s*(.+?)\s*$/m)?.[1].replace(/^(["'])(.*)\1$/, "$2") || null;
+    fields = frontMatterFields(front[1]);
   }
   const prompt = body.trim();
+  let description = fields.description || null;
   if (!description) {
     const first = prompt.split("\n").find((line) => line.trim()) ?? "";
     description = first.replace(/^#+\s+/, "").trim();
   }
   if (description.length > MAX_DESCRIPTION) description = `${description.slice(0, MAX_DESCRIPTION - 1)}…`;
-  return { prompt, description };
+  // A model ID has no spaces: "model: the fast one" isn't one.
+  const model = /^\S+$/.test(fields.model ?? "") ? fields.model : null;
+  return { prompt, description, model };
 }
 
 /**
  * The commands there are, as a Map from name (without the slash) to { name, prompt, description,
- * scope ("project" or "user"), file }. Names come from the file names, in lower case. Also
+ * model, scope ("project" or "user"), file }. Names come from the file names, in lower case. Also
  * returns `skipped`: the .md files that aren't commands, each with its file and why — a name that
  * isn't a command name (like "my notes.md"), the name of one of `builtIn`, no prompt in it, or
  * another scope's file of the same name winning.
@@ -77,14 +96,14 @@ export function loadCommands({ cwd = process.cwd(), home = homedir(), builtIn = 
       } catch {
         continue;
       }
-      const { prompt, description } = parseCommand(text);
+      const { prompt, description, model } = parseCommand(text);
       if (!prompt) {
         skipped.push({ name, scope, file, reason: "no prompt in it" });
         continue;
       }
       const existing = commands.get(name);
       if (existing) skipped.push({ name, scope: existing.scope, file: existing.file, reason: `the ${scope}'s ${name}.md wins` });
-      commands.set(name, { name, prompt, description, scope, file });
+      commands.set(name, { name, prompt, description, model, scope, file });
     }
   }
   return { commands, skipped };

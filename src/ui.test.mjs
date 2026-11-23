@@ -6,11 +6,13 @@ import {
   commandLines,
   confirmPrompt,
   detailLines,
+  excerpt,
   formatDuration,
   formatTokens,
   helpLines,
   markdownAsText,
   numberedLines,
+  questionLine,
   ruleScope,
   taskFooter,
   toolCallLine,
@@ -199,6 +201,42 @@ describe("numberedLines", () => {
     expect(lines(numberedLines(["a", "b"]))).toEqual(["  1  a", "  2  b"]);
     expect(lines(numberedLines(Array.from({ length: 10 }, (_, i) => `item ${i + 1}`)))[9]).toBe("  10  item 10");
     expect(lines(numberedLines(Array.from({ length: 10 }, (_, i) => `item ${i + 1}`)))[0]).toBe("   1  item 1");
+  });
+
+  it("keeps the numbers it is given, with an item's further lines under its text", () => {
+    expect(lines(numberedLines([["first", "under first"], "second"], [3, 12]))).toEqual(["   3  first", "      under first", "  12  second"]);
+    expect(numberedLines([])).toEqual([]);
+  });
+});
+
+describe("excerpt", () => {
+  const text = "please look at the build script, then fix the flaky parser test that fails on Windows only";
+
+  it("keeps short text whole, on one line", () => {
+    expect(excerpt("fix the\n  parser", ["parser"])).toBe("fix the parser");
+  });
+
+  it("shows the part around the first word it finds, in any case, cut to fit", () => {
+    // Cut between words, the word found a little way in.
+    expect(excerpt(text, ["PARSER", "windows"], 40)).toBe("…the flaky parser test that fails on…");
+    // Near the end, it ends with the text; near the start, it starts with it.
+    expect(excerpt(text, ["only"], 40)).toBe("…parser test that fails on Windows only");
+    expect(excerpt(text, ["please"], 40)).toBe("please look at the build script, then…");
+    // Without the words, the start.
+    expect(excerpt(text, ["missing"], 40)).toBe("please look at the build script, then…");
+    // A long word is cut where it must be, and the excerpt is never longer than asked.
+    const word = "x".repeat(100);
+    expect(excerpt(`${word} needle ${word}`, ["needle"], 30)).toBe(`…needle ${"x".repeat(21)}…`);
+    for (const words of [["parser"], ["only"], ["please"], ["fails"]]) {
+      for (const max of [20, 33, 40, 61]) expect(excerpt(text, words, max).length).toBeLessThanOrEqual(max);
+    }
+  });
+});
+
+describe("questionLine", () => {
+  it("asks a question, with the choices and where the answer goes", () => {
+    expect(plain(questionLine("Delete this?"))).toBe("  ? Delete this? y/N › ");
+    expect(plain(questionLine("Delete it?", "yesterday · y/N"))).toBe("  ? Delete it? yesterday · y/N › ");
   });
 });
 

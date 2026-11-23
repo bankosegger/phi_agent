@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { PLAN_NOTE } from "./agent-core.mjs";
 import { ignoreAgentFolder } from "./tools.mjs";
 
 // Conversations are saved in the project, under .agent/sessions, after every task, so a later
@@ -72,19 +73,73 @@ export function saveHistory(lines, file = HISTORY_FILE) {
   writeFileSync(file, lines.length ? `${[...lines].reverse().join("\n")}\n` : "");
 }
 
-/**
- * The saved conversations, the one saved last first, without their messages but with how many
- * there are (`messageCount`). Unreadable files are skipped.
- */
-export function listSessions(dir = SESSIONS_DIR) {
+// The saved conversations, the one saved last first, messages and all, each with its number in
+// that order (from 1). Unreadable files are skipped, and get no number.
+function readSessions(dir) {
   const sessions = [];
   for (const name of sessionFiles(dir)) {
     try {
-      const { messages, ...session } = loadSession(join(dir, name));
-      sessions.push({ ...session, messageCount: messages.length });
+      sessions.push({ ...loadSession(join(dir, name)), number: sessions.length + 1 });
     } catch {
       // not a conversation
     }
   }
   return sessions;
+}
+
+/**
+ * The saved conversations, the one saved last first, without their messages but with how many
+ * there are (`messageCount`), and each with its `number` in this list, from 1, which /resume
+ * goes by. Unreadable files are skipped.
+ */
+export function listSessions(dir = SESSIONS_DIR) {
+  return readSessions(dir).map(({ messages, ...session }) => ({ ...session, messageCount: messages.length }));
+}
+
+// What the user asked for in a conversation, oldest first: the text of each task, without what
+// was attached to it (a file's content isn't something the user asked) or the note plan mode adds.
+// The agent's own notes to the model, like a summary of earlier tasks, are user messages too.
+function taskTexts(messages) {
+  const texts = [];
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    const first = Array.isArray(message.content) ? message.content[0] : { type: "text", text: message.content };
+    let text = first?.type === "text" ? String(first.text ?? "") : "";
+    if (text.startsWith(PLAN_NOTE)) text = text.slice(PLAN_NOTE.length);
+    if (text.trim()) texts.push(text.trim());
+  }
+  return texts;
+}
+
+/**
+ * The saved conversations in which the user asked for something with each of `query`'s words in
+ * it, in any case, listed and numbered as listSessions lists them. Each has `match`: the task
+ * with most of the words its title lacks, or null when its title has them all. Without words,
+ * that is all of them.
+ */
+export function searchSessions(query, dir = SESSIONS_DIR) {
+  const words = String(query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+  const found = [];
+  for (const { messages, ...session } of readSessions(dir)) {
+    const tasks = taskTexts(messages);
+    const all = [session.title, session.lastTask, ...tasks].filter(Boolean).join("\n").toLowerCase();
+    if (!words.every((word) => all.includes(word))) continue;
+
+    // The title is shown anyway: the match shows where the words it lacks are.
+    const title = (session.title ?? "").toLowerCase();
+    const missing = words.filter((word) => !title.includes(word));
+    let match = null;
+    let most = 0;
+    for (const task of [...tasks, session.lastTask ?? ""]) {
+      const count = missing.filter((word) => task.toLowerCase().includes(word)).length;
+      if (count > most) [match, most] = [task, count];
+    }
+    found.push({ ...session, messageCount: messages.length, match });
+  }
+  return found;
+}
+
+/** Deletes a saved conversation. */
+export function deleteSession(file) {
+  rmSync(file, { force: true });
 }

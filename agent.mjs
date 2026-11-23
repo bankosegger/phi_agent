@@ -32,7 +32,7 @@ import { previewToolCall, previewToolResult } from "./src/preview.mjs";
 import { backgroundProcesses } from "./src/processes.mjs";
 import { PERMISSIONS_FILE, allows, loadRules, ruleFor, saveRules } from "./src/permissions.mjs";
 import { runInSandbox } from "./src/sandbox.mjs";
-import { listSessions, loadHistory, loadSession, newSessionFile, saveHistory, saveSession } from "./src/sessions.mjs";
+import { deleteSession, listSessions, loadHistory, loadSession, newSessionFile, saveHistory, saveSession, searchSessions } from "./src/sessions.mjs";
 import { createStatus } from "./src/status.mjs";
 import { displayWidth, glyphs, hasColors, theme, truncateEnd } from "./src/theme.mjs";
 import { needsConfirmation } from "./src/tools.mjs";
@@ -41,6 +41,7 @@ import {
   commandLines,
   confirmPrompt,
   detailLines,
+  excerpt,
   formatDuration,
   formatTokens,
   helpLines,
@@ -50,6 +51,7 @@ import {
   numberedLines,
   outcomeLine,
   plural,
+  questionLine,
   taskFooter,
   toolCallLine,
 } from "./src/ui.mjs";
@@ -855,36 +857,101 @@ async function stopForNewConversation() {
   if (stopped) print(info(`Stopped ${stopped === 1 ? "1 background process" : `${stopped} background processes`}.`));
 }
 
-// /resume lists the saved conversations; /resume <n> continues one of them.
+// How many saved conversations /resume lists; /resume <words> finds the others.
+const LISTED_SESSIONS = 10;
+
+// A saved conversation in /resume's list: its title, when it was used last, and its tasks.
+function sessionLine(saved) {
+  const current = saved.file === session?.file ? theme.accent("  (this one)") : "";
+  return `${saved.title || "untitled"}  ${info(`${when(saved.updated)} · ${plural(saved.tasks ?? 0, "task")}`)}${current}`;
+}
+
+// The saved conversation numbered `argument` in /resume's list, or null, saying why.
+function savedConversation(argument) {
+  const chosen = /^\d+$/.test(argument) ? listSessions()[Number(argument) - 1] : null;
+  if (!chosen) print(warning(`There's no saved conversation ${argument}. /resume lists them.`));
+  return chosen ?? null;
+}
+
+// /resume lists the saved conversations, used last first; /resume <n> continues one of them,
+// /resume <words> finds them by what the user asked in them, and /resume delete <n> deletes one.
 async function resume(argument) {
-  const sessions = listSessions();
+  const remove = argument.match(/^(?:delete|remove|rm)\b\s*(.*)$/i);
+  if (remove) return deleteConversation(remove[1].trim());
+  if (argument && !/^\d+$/.test(argument)) return findConversations(argument);
+
   if (!argument) {
+    const sessions = listSessions();
     if (!sessions.length) {
       print(info("No saved conversations in this project yet. Each one is saved after its first task."));
       return;
     }
     print(theme.strong("Saved conversations, last used first"));
-    printLines(
-      numberedLines(
-        sessions.slice(0, 10).map((saved) => {
-          const current = saved.file === session?.file ? theme.accent("  (this one)") : "";
-          return `${saved.title || "untitled"}  ${info(`${when(saved.updated)} · ${plural(saved.tasks ?? 0, "task")}`)}${current}`;
-        }),
-      ),
-    );
-    print(info("Continue one with /resume <number>."));
+    printLines(numberedLines(sessions.slice(0, LISTED_SESSIONS).map(sessionLine)));
+    const more = sessions.length - LISTED_SESSIONS;
+    if (more > 0) print(info(`${plural(more, "older one")} too: /resume <words> finds conversations by their tasks.`));
+    print(info("Continue one with /resume <number>, or delete it with /resume delete <number>."));
     return;
   }
 
-  const chosen = sessions[Number(argument) - 1];
-  if (!/^\d+$/.test(argument) || !chosen) {
-    print(warning(`There's no saved conversation ${argument}. /resume lists them.`));
-    return;
-  }
+  const chosen = savedConversation(argument);
+  if (!chosen) return;
   const saved = loadSession(chosen.file);
   await stopForNewConversation();
   resumeConversation(saved);
   showResumed(saved);
+}
+
+// /resume <words>: the saved conversations in which the user asked for something with the words,
+// each with where they are, unless its title has them all.
+function findConversations(query) {
+  const found = searchSessions(query);
+  if (!found.length) {
+    print(info(`No saved conversation has "${query}" in its tasks. /resume lists them.`));
+    return;
+  }
+  const words = query.split(/\s+/);
+  const width = Math.min(lineWidth(output.columns), 100) - 10;
+  print(theme.strong(`Saved conversations with "${query}"`));
+  printLines(
+    numberedLines(
+      found.map((saved) => (saved.match ? [sessionLine(saved), info(`${glyphs.gutter} ${excerpt(saved.match, words, width)}`)] : sessionLine(saved))),
+      found.map(({ number }) => number),
+    ),
+  );
+  print(info("Continue one with /resume <number>."));
+}
+
+// /resume delete <n>: deletes a saved conversation, once the user says so. Not the one going on,
+// which would only be saved again after its next task.
+async function deleteConversation(argument) {
+  if (!argument) {
+    print(warning("Which one? /resume delete <number> deletes a saved conversation; /resume lists them."));
+    return;
+  }
+  const chosen = savedConversation(argument);
+  if (!chosen) return;
+  const title = chosen.title || "untitled";
+  if (chosen.file === session?.file) {
+    print(warning(`That's this conversation. /clear starts a new one; then /resume delete can delete "${title}".`));
+    return;
+  }
+
+  // Ctrl+C at the question says no, rather than quitting the agent.
+  const controller = new AbortController();
+  activeTask = controller;
+  let answer;
+  try {
+    answer = await userInput.ask(questionLine(`Delete "${title}"?`, `${when(chosen.updated)} · ${plural(chosen.tasks ?? 0, "task")} · y/N`), controller.signal);
+  } finally {
+    activeTask = null;
+  }
+  if (!/^y(es)?$/i.test(answer?.trim() ?? "")) {
+    print(info("Kept it."));
+    return;
+  }
+  deleteSession(chosen.file);
+  print(`${theme.success(glyphs.ok)} Deleted ${theme.strong(title)}`);
 }
 
 // Runs a slash command. Resolves to false when the CLI should quit.

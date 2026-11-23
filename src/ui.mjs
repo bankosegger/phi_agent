@@ -125,13 +125,18 @@ export function ruleScope(rule) {
   return TOOL_NOUNS[rule] ?? `${rule} calls`;
 }
 
+/** A question for the user, like "  ? Delete this? y/N › ", with the answer to go after it. */
+export function questionLine(question, choices = "y/N") {
+  return `${INDENT}${theme.warning("?")} ${theme.strong(question)} ${theme.muted(choices)} ${theme.accent("›")} `;
+}
+
 /**
  * The question before a tool call runs, offering "a" (always) when there is a rule to save.
  * In a narrow terminal, the choices are only named, so that the answer fits on the line.
  */
 export function confirmPrompt(name, args, rule, g = defaultGlyphs, columns = 80) {
   const question = QUESTIONS[name]?.(args) ?? `Run ${TOOL_LABELS[name] ?? name}?`;
-  const ask = (choices) => `${INDENT}${theme.warning("?")} ${theme.strong(question)} ${theme.muted(choices)} ${theme.accent("›")} `;
+  const ask = (choices) => questionLine(question, choices);
   if (!rule) return ask("y/N");
   const full = ask(`y/N · a = always allow ${ruleScope(rule)}`);
   // Room for the answer after it, too.
@@ -207,7 +212,7 @@ export function banner({ version, model, project, following = [], sandbox = fals
 const COMMANDS = [
   ["/help", "[name]", "Show this help, or one of your commands in full"],
   ["/clear", "", "Start a new conversation"],
-  ["/resume", "[n]", "List the saved conversations, or continue conversation n"],
+  ["/resume", "[n]", "List the saved conversations, or continue conversation n. /resume <words> finds them by their tasks; /resume delete <n> deletes one"],
   ["/compact", "", "Summarize the conversation so far, to free up the model's context"],
   ["/undo", "", "Revert the file changes of the last task (again for the task before)"],
   ["/plan", "", "Plan mode on or off: the agent only looks around and replies with a plan"],
@@ -300,8 +305,41 @@ export function markdownAsText(line) {
     .replace(/(\*\*|__|~~|`)(?=\S)(.+?)(?<=\S)\1/g, "$2");
 }
 
-/** Items numbered from 1, the numbers in color: "  1  first". */
-export function numberedLines(items) {
-  const width = String(items.length).length;
-  return items.map((item, i) => `${INDENT}${theme.accent(String(i + 1).padStart(width))}  ${item}`);
+/**
+ * Items numbered from 1, or with the given `numbers`, the numbers in color: "  1  first". An item
+ * can be an array of lines, the lines after its first going under its text.
+ */
+export function numberedLines(items, numbers = items.map((_, i) => i + 1)) {
+  const width = Math.max(0, ...numbers.map((number) => String(number).length));
+  return items.flatMap((item, i) => {
+    const [first, ...rest] = Array.isArray(item) ? item : [item];
+    return [`${INDENT}${theme.accent(String(numbers[i]).padStart(width))}  ${first}`, ...rest.map((line) => `${INDENT}${" ".repeat(width)}  ${line}`)];
+  });
+}
+
+/**
+ * Part of `text`, on one line and at most `max` characters, around the first of `words` it has
+ * (in any case), with "…" where it was cut: for showing where a search found something.
+ */
+export function excerpt(text, words, max = 60) {
+  const line = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (line.length <= max) return line;
+  const lower = line.toLowerCase();
+  const at = Math.min(...words.map((word) => lower.indexOf(String(word).toLowerCase())).filter((index) => index >= 0), Infinity);
+  // The word a third of the way in, so there is some of what comes before it, but no further
+  // than the end of the text allows: after a "…", max - 1 characters of it fit.
+  let start = at === Infinity ? 0 : Math.max(0, Math.min(at - Math.floor(max / 3), line.length - max + 1));
+  // Cuts fall between words where one is near, not before the word found.
+  if (start > 0 && line[start - 1] !== " ") {
+    const next = line.indexOf(" ", start) + 1;
+    if (next > 0 && next <= Math.min(at, start + 10)) start = next;
+  }
+  let end = start + max - (start > 0 ? 1 : 0);
+  const cut = end < line.length;
+  if (cut) {
+    end--; // room for the "…" at the end
+    const space = line.lastIndexOf(" ", end);
+    if (space > start && end - space <= 10) end = space;
+  }
+  return `${start > 0 ? "…" : ""}${line.slice(start, end)}${cut ? "…" : ""}`;
 }

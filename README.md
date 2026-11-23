@@ -117,7 +117,7 @@ With an `anthropic/` model on OpenRouter, the agent marks the prompt for caching
 | --- | --- |
 | `/help [name]` | Show the commands, and your own; with a name, one of your commands in full |
 | `/clear` | Start a new conversation |
-| `/resume [n]` | List the saved conversations, or continue conversation n |
+| `/resume [n]` | List the saved conversations, or continue conversation n; `/resume <words>` finds them by their tasks, and `/resume delete <n>` deletes one (see [Saved conversations](#saved-conversations)) |
 | `/compact` | Summarize the conversation so far, to free up the model's context |
 | `/undo` | Revert the file changes of the last task; run it again for the task before |
 | `/plan` | Turn plan mode on or off (see [Plan mode](#plan-mode)) |
@@ -186,7 +186,11 @@ The rules are saved in `.agent/permissions.json`. `/permissions` lists them, and
 
 ### Saved conversations
 
-After each task, the conversation is saved in the project's `.agent/sessions` folder, which git ignores. `--continue` picks up the one you used last in that folder, so quitting, or a stray Ctrl+C, loses nothing. `/resume` lists the saved conversations, and `/resume <n>` goes back to one. The 30 you used last are kept.
+After each task, the conversation is saved in the project's `.agent/sessions` folder, which git ignores. `--continue` picks up the one you used last in that folder, so quitting, or a stray Ctrl+C, loses nothing. `/resume` lists the 10 you used last, and `/resume <n>` goes back to one. The 30 you used last are kept.
+
+To find an older one, give `/resume` words from what you asked in it, like `/resume parser tabs`: it lists the conversations with all of the words in their tasks, in any case, numbered as in the full list, each with the task that has them under its title. Only what you asked is searched, not the replies, nor files you attached with `@`.
+
+`/resume delete <n>` deletes conversation n, after asking. The one you are in can't be deleted, as it would only be saved again after its next task: `/clear` first.
 
 A continued conversation gets a fresh system prompt, with the project's `AGENTS.md` as it is now. `/undo` only covers changes since the agent started, and background processes don't carry over.
 

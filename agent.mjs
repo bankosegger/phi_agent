@@ -88,6 +88,11 @@ if (options.version) {
   process.exit(0);
 }
 
+// With --print, the agent runs one task without reading the terminal: the reply goes to stdout,
+// and everything else (tool calls, errors, usage) to stderr, so a script gets just the reply.
+// (Starting the sandbox needs to know too, before anything else is set up.)
+const HEADLESS = options.print || options.json; // --json implies --print
+
 // OpenRouter's key is for the models it has, like openai/gpt-4o-mini; Anthropic's for Claude
 // models through the Claude API, like claude-opus-5-5. Either will do, or both.
 if (!process.env.OPENROUTER_API_KEY && !process.env.ANTHROPIC_API_KEY) {
@@ -284,9 +289,7 @@ function canSeeImages(name = model) {
   return modelInfo(models, name)?.images !== false;
 }
 
-// With --print, the agent runs one task without reading the terminal: the reply goes to stdout,
-// and everything else (tool calls, errors, usage) to stderr, so a script gets just the reply.
-const HEADLESS = options.print || options.json; // --json implies --print
+// Replies go to stdout, and everything else to stderr without a terminal (see HEADLESS).
 const messageOutput = HEADLESS ? process.stderr : output;
 
 const info = (text) => theme.muted(text);

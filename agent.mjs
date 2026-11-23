@@ -33,6 +33,7 @@ import { backgroundProcesses } from "./src/processes.mjs";
 import { PERMISSIONS_FILE, allows, loadRules, ruleFor, saveRules } from "./src/permissions.mjs";
 import { runInSandbox } from "./src/sandbox.mjs";
 import { loadSettings } from "./src/settings.mjs";
+import { commandStatus, fitLine, gitState, statusText } from "./src/statusline.mjs";
 import { deleteSession, listSessions, loadHistory, loadSession, newSessionFile, saveHistory, saveSession, searchSessions } from "./src/sessions.mjs";
 import { createStatus } from "./src/status.mjs";
 import { displayWidth, glyphs, hasColors, theme, truncateEnd } from "./src/theme.mjs";
@@ -1239,6 +1240,36 @@ async function handleInput(line) {
   return going;
 }
 
+// What a status line command (see statusline.mjs) is given, as JSON on its input.
+function statusInfo(git) {
+  const percent = context.used != null && context.limit ? Math.round((100 * context.used) / context.limit) : null;
+  return {
+    version: VERSION,
+    model,
+    project: projectDir,
+    git,
+    plan: planMode,
+    sandbox: IN_SANDBOX,
+    context: { used: context.used ?? null, limit: context.limit ?? null, percent },
+    cost: { session: sessionCost, estimated: sessionEstimated },
+    conversation: session ? { title: session.title, tasks: session.tasks, file: session.file } : null,
+  };
+}
+
+// The status line above the prompt: the model, the git branch and the modes, or the line the
+// user's own command prints ("statusLine" in their settings), or none ("statusLine": false).
+async function showStatusLine() {
+  if (settings.statusLine === false) return;
+  const width = lineWidth(output.columns);
+  const git = await gitState();
+  if (typeof settings.statusLine === "string") {
+    const line = await commandStatus(settings.statusLine, statusInfo(git));
+    if (line) print(fitLine(line, width));
+    return;
+  }
+  print(theme.muted(fitLine(statusText({ model, git, plan: planMode, sandbox: IN_SANDBOX, yes: options.yes }), width)));
+}
+
 async function runInteractive() {
   printLines(
     banner(
@@ -1255,11 +1286,18 @@ async function runInteractive() {
     going = await handleInput(firstTask);
   }
 
+  // The status line shows before the prompt after something ran, not again for an empty line.
+  let statusDue = true;
   while (going) {
+    if (statusDue) await showStatusLine();
+    statusDue = false;
     const text = await userInput.next(prompt());
     if (text == null) break;
     const line = text.trim();
-    if (line) going = await handleInput(line);
+    if (line) {
+      going = await handleInput(line);
+      statusDue = true;
+    }
   }
 
   const stopped = await backgroundProcesses.stopAll();

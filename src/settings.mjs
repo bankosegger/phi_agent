@@ -12,8 +12,8 @@ import { tools } from "./tools.mjs";
 //
 // The project's win over the user's, and both over .env; command-line options win over all.
 // Anyone can commit a project's settings, so they can't loosen what the user decided: only the
-// user's own file can allow tool calls without asking ("allow"), and "sandbox": false doesn't
-// turn off a sandbox asked for anywhere else.
+// user's own file can allow tool calls without asking ("allow") or run a command for the status
+// line, and "sandbox": false doesn't turn off a sandbox asked for anywhere else.
 
 export const SETTINGS_FILE = "settings.json";
 
@@ -37,6 +37,10 @@ const SETTINGS = {
   maxToolRounds: { what: "a whole number from 1 up", check: (value) => Number.isInteger(value) && value >= 1 },
   sandbox: { what: "true or false", check: (value) => typeof value === "boolean" },
   bell: { what: "true or false", check: (value) => typeof value === "boolean" },
+  statusLine: {
+    what: 'true, false, or a command that prints the line, like "node ~/status.js"',
+    check: (value) => typeof value === "boolean" || (typeof value === "string" && value.trim() !== ""),
+  },
   allow: {
     what: 'a list of rules, like ["shell: npm test", "edit_file"]',
     check: (value) => Array.isArray(value) && value.every((rule) => typeof rule === "string"),
@@ -77,6 +81,10 @@ export function readSettingsFile(file, { user = false } = {}) {
       problems.push(`"${key}" only counts in your own ~/${USER_DIR}/${SETTINGS_FILE}: a project's settings can't allow tool calls`);
     } else if (!setting.check(value)) {
       problems.push(`"${key}" should be ${setting.what}`);
+    } else if (key === "statusLine" && typeof value === "string" && !user) {
+      problems.push(`"statusLine" can only be a command in your own ~/${USER_DIR}/${SETTINGS_FILE}: a project's settings can't run commands`);
+    } else if (key === "statusLine" && typeof value === "string") {
+      settings.statusLine = value.trim();
     } else if (key === "allow") {
       settings.allow = [];
       for (const text of value) {

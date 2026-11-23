@@ -115,11 +115,18 @@ Settings for one project go in its `.phi-agent/settings.json`, which git can sha
 | `maxToolRounds` | Model requests per task before the agent stops | `MAX_TOOL_ROUNDS` |
 | `sandbox` | `true` runs the agent in the [Docker sandbox](#docker-sandbox) | `SANDBOX=docker` |
 | `bell` | `false` silences the terminal's bell | `BELL=off` |
+| `statusLine` | `false` hides the [status line](#status-line); a command prints your own — only in your own file | |
 | `allow` | Tool calls that run without asking, as [permission rules](#permissions) — only in your own file | answering `a` |
 
 The project's settings win over yours, and both win over `.env`; options on the command line, like `--model`, win over all of them. The banner names the settings files in use, and the agent says what it can't use in one, like a misspelled setting, and uses the rest. They are read when the agent starts.
 
-Anyone can commit a project's settings, so they can't loosen what you decided: only your own file can allow tool calls, and a project's `"sandbox": false` doesn't turn off a sandbox asked for anywhere else. `/permissions` lists your own file's rules with the project's.
+Anyone can commit a project's settings, so they can't loosen what you decided: only your own file can allow tool calls or run a command for the status line, and a project's `"sandbox": false` doesn't turn off a sandbox asked for anywhere else. `/permissions` lists your own file's rules with the project's.
+
+### Status line
+
+Above the prompt, a line shows the model in use, the git branch, with a `*` when tracked files have changes that aren't committed, and the modes that change what the agent does: `claude-opus-5-5 · main* · plan mode`. `"statusLine": false` in a settings file hides it.
+
+To print your own, set `"statusLine"` in your own `~/.phi-agent/settings.json` to a command, like `"node ~/status.js"`. It runs before each prompt, without your API keys in its environment, and gets what the agent knows as JSON on its input: `model`, `project`, `git` (`branch`, `dirty`, or null outside a repository), `plan`, `sandbox`, `context` (`used`, `limit`, `percent`), `cost` (`session`, `estimated`), `conversation` (`title`, `tasks`, `file`) and `version`. The first line it prints is shown, colors and all; a command that fails, prints nothing, or takes over two seconds shows nothing.
 
 ## Models
 

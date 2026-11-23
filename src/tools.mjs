@@ -326,6 +326,22 @@ export const tools = [
   {
     type: "function",
     function: {
+      name: "subagent",
+      description:
+        "Hand a self-contained task to a helper with a context of its own, which looks around the project (and the web, if the task needs it) and replies with what it found. Use it for searches and research that would fill this conversation with file contents: where something is defined or used, how a part of the project works, what a library's docs say. It can't change anything. It sees only the task, not this conversation: say everything it needs to know, and what to report back.",
+      parameters: {
+        type: "object",
+        properties: {
+          description: { type: "string", description: 'A few words on what it does, shown to the user, like "Find the config loader"' },
+          task: { type: "string", description: "The task, in full" },
+        },
+        required: ["task"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "todo_write",
       description:
         "Keep a to-do list for a task of several steps, which the user sees as you go. Write the whole list each time: first with every step pending, then again whenever a step starts (in_progress, one at a time) or is done (completed, right away, not all at the end). Add steps you find along the way. Not for a task of one or two steps.",
@@ -1134,6 +1150,9 @@ const CHECKS = {
     if (!String(args?.query ?? "").trim()) throw new Error("query must not be empty");
   },
   todo_write: todoList,
+  subagent: (args) => {
+    if (typeof args?.task !== "string" || !args.task.trim()) throw new Error("task must say what the helper is to do");
+  },
 };
 
 // Throws if a tool call that needs confirmation would fail anyway, like an edit whose
@@ -1192,6 +1211,11 @@ export async function runTool(name, args, { signal, changes } = {}) {
   // The list itself is for the user, who sees it as the call comes in (see preview.mjs).
   if (name === "todo_write") {
     return updatedTodos(args);
+  }
+
+  // A helper is a conversation of its own, which agentTurn runs (see agent-core.mjs).
+  if (name === "subagent") {
+    throw new Error("a helper runs in agentTurn, not as a tool of its own");
   }
 
   // Models often send "" or null for "the project root".

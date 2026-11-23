@@ -234,6 +234,12 @@ After each task, the agent lists the files it changed, then draws a line across 
 
 When a reply stops at the model's output limit, the agent says so. A tool call the limit cut off doesn't run: the model is told to make it again, in smaller parts.
 
+### Helpers
+
+Every file the model reads stays in the conversation, which fills the model's context and makes each request after it cost more. For a search or a question that takes many reads, like where something is used or how a part of the project works, the model can hand it to a helper with `subagent`: a conversation of its own, with the same model, which looks around and replies with what it found. Only that reply joins the conversation.
+
+A helper has only the tools that look around: it reads, searches, and can search and fetch from the web (which ask first, as usual), but can't change files, run commands, or start helpers of its own. Its calls show dimmed under its line, like `● Helper Find the config loader`, then the start of its report and how many calls it took. Its tokens count in the task's usage line. Helpers only look, so they work in plan mode too.
+
 ### Undo
 
 `/undo` puts back the files the last task changed: edited or overwritten files get their old content back exactly, deleted and moved files come back where they were, and files the agent created are deleted, along with folders made for them. Run it again to undo the task before that. A file that changed again after the agent wrote it, by you or by a command, is kept and named instead. The model is told what was undone, so it doesn't assume its changes are still there.
@@ -335,6 +341,7 @@ In the Docker sandbox, a server the agent starts can only be reached inside the 
 | `process_output` | Read what a background process printed since the last read | no |
 | `stop_process` | Stop a background process | no |
 | `todo_write` | Keep a to-do list for a task of several steps, which you see ticked off as the agent goes | no |
+| `subagent` | Hand a search or a question to a [helper](#helpers) with a context of its own, which looks around and reports back | no (its own tools ask as usual) |
 
 `list_dir`, `find_files` and `grep` skip `node_modules`, `.git` and `.agent`. In a git repository they also skip what git ignores, like `dist/` or `.env`, so results stay about your source. `list_dir` names the ignored entries it left out, and naming an ignored folder as the `path` searches it anyway. `grep` also leaves out files that may hold secrets (see [Safety](#safety)), unless one is its `path`.
 

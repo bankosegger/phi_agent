@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { claudeRequest, dropThinking, isClaudeModel, streamClaudeReply } from "./claude.mjs";
+import { ContextWindow } from "./context.mjs";
 import { checkToolCall, runTool, toolsFor } from "./tools.mjs";
 
 const DEFAULT_MAX_TOOL_ROUNDS = 25;
@@ -11,14 +12,17 @@ export const INSTRUCTIONS_FILE = "AGENTS.md";
 export const CANCELLED = "cancelled by user";
 export const SKIPPED = "skipped by user";
 
+// The tools that only look around: all a helper (see runSubagent) has.
+const LOOKING_TOOLS = new Set(["read_file", "list_dir", "find_files", "grep", "git", "view_image", "fetch_url", "web_search", "process_output"]);
 // Plan mode: the model looks around and replies with a plan, changing nothing. Only these tools
-// run: those that look around, and the to-do list, which only the user sees. The others are
-// refused, though still offered, since some providers reject a request whose history has calls
-// to tools it doesn't list.
-const LOOKING_TOOLS = new Set(["read_file", "list_dir", "find_files", "grep", "git", "view_image", "fetch_url", "web_search", "process_output", "todo_write"]);
+// run: those that look around, the to-do list, which only the user sees, and helpers, which only
+// look around too. The others are refused, though still offered, since some providers reject a
+// request whose history has calls to tools it doesn't list.
+const PLAN_TOOLS = new Set([...LOOKING_TOOLS, "todo_write", "subagent"]);
 export const PLAN_NOTE =
   "(Plan mode: look around as much as you need, but change nothing: no file changes, and no commands. Reply with a plan of what you would do and why, for me to approve.)";
 const PLAN_REFUSAL = "plan mode is on, so nothing can be changed or run yet: put this step in your plan instead";
+const HELPER_REFUSAL = "a helper only looks around: it can't change files or run commands";
 
 // The user's own settings folder, in their home folder: ~/.phi-agent.
 export const USER_DIR = ".phi-agent";
@@ -67,6 +71,7 @@ export function systemPrompt({
     "Prefer read_file, list_dir, find_files, grep and git over shell for exploring the project, and web_search to find pages on the web, then fetch_url over curl to read them. Use edit_file for small changes to existing files.",
     "Delete, move and rename files and folders with delete_file and move_file rather than shell, so the user can undo it.",
     "For a task of several steps, keep a to-do list with todo_write and update it as you go, so the user can follow your progress.",
+    "Hand searches and research that would take many reads, like where something is used or how a part of the project works, to a helper with subagent: it looks around in a context of its own and replies with what it found, which keeps this conversation short.",
     "Start servers and watchers that keep running with shell's background option, check on them with process_output, and stop them with stop_process when you no longer need them, unless the user wants them left running.",
     "New files can't be created at the project root: put them in a folder like src/. Existing root files, like package.json or README.md, can be edited. Save generated output that isn't project source, like a report or an export, with write_asset.",
     `The user can decline file changes and shell commands. When a tool result is "${SKIPPED}", do not retry it; ask the user what they want instead.`,
@@ -89,6 +94,22 @@ export function systemPrompt({
     lines.push("", `Instructions from the project's ${INSTRUCTIONS_FILE}. Follow them unless the user says otherwise${order}:`, "", instructions);
   }
   return lines.join("\n");
+}
+
+/**
+ * The system prompt of a helper (see the subagent tool): it has one task, looks around for it,
+ * and reports what it found to the agent that asked.
+ */
+export function subagentPrompt({ cwd = process.cwd(), platform = process.platform, date = new Date() } = {}) {
+  return [
+    "You are a helper of a coding agent, which gave you one task. Do it by looking around the project with your tools, and on the web if the task needs it. You can't change anything: no file changes, and no commands.",
+    "Search before you read, and read only what the task needs.",
+    "Then reply to the agent with what you found: a short report, with file paths and line numbers, and the code that matters. The agent sees only your reply, not your tool calls.",
+    "",
+    `Project directory: ${cwd}`,
+    `Platform: ${platform}`,
+    `Today's date: ${localDate(date)}`,
+  ].join("\n");
 }
 
 // A new conversation. Its system prompt includes the project's AGENTS.md and the user's own,
@@ -177,8 +198,9 @@ const CUT_OFF_REFUSAL =
 
 // Resolves to { status: "ok" | "error" | "skipped" | "cancelled", content, parts }, where content
 // is what the model is told, and parts (from view_image) are message parts to show it after.
-// A call that was `cutOff` is only announced.
-async function callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode, moreTools, cutOff = false }) {
+// A call that was `cutOff` is only announced. A helper (`readOnly`) only looks around; a call to
+// start one runs `runSubagent(args)`.
+async function callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode, readOnly, moreTools, runSubagent, cutOff = false }) {
   const cancelled = { status: "cancelled", content: CANCELLED };
   if (signal?.aborted) return cancelled;
 
@@ -195,7 +217,8 @@ async function callTool(call, { confirmTool, onToolCall, onActivity, signal, cha
   try {
     onToolCall(name, args);
     if (cutOff) return { status: "error", content: `error: ${CUT_OFF_REFUSAL}` };
-    if (planMode && !LOOKING_TOOLS.has(name)) return { status: "error", content: `error: ${PLAN_REFUSAL}` };
+    if (readOnly && !LOOKING_TOOLS.has(name)) return { status: "error", content: `error: ${HELPER_REFUSAL}` };
+    if (planMode && !PLAN_TOOLS.has(name)) return { status: "error", content: `error: ${PLAN_REFUSAL}` };
     // A call that would fail anyway, like an edit of text that isn't in the file, is reported
     // without asking the user to approve it.
     checkToolCall(name, args);
@@ -207,7 +230,10 @@ async function callTool(call, { confirmTool, onToolCall, onActivity, signal, cha
 
     // A cancelled shell command still returns its output so far, which the model should see.
     onActivity?.({ type: "running", name, args });
-    const result = moreTools?.has(name) ? await moreTools.run(name, args, { signal }) : await runTool(name, args, { signal, changes });
+    let result;
+    if (name === "subagent") result = await runSubagent(args);
+    else if (moreTools?.has(name)) result = await moreTools.run(name, args, { signal });
+    else result = await runTool(name, args, { signal, changes });
     const { content, parts } = typeof result === "object" && result !== null ? result : { content: String(result) };
     return { status: signal?.aborted ? "cancelled" : "ok", content, ...(parts && { parts }) };
   } catch (error) {
@@ -236,9 +262,12 @@ function withoutImages(messages) {
 }
 
 // The messages and tools to send a model, depending on whether it can see images, with the tools
-// of `moreTools` (see agentTurn) after the agent's own.
-function forModel(messages, canSeeImages, moreTools = null) {
-  const tools = [...toolsFor({ images: canSeeImages }), ...(moreTools?.tools ?? [])];
+// of `moreTools` (see agentTurn) after the agent's own. A helper (`readOnly`) has only the tools
+// that look around.
+function forModel(messages, { canSeeImages = true, moreTools = null, readOnly = false } = {}) {
+  const tools = readOnly
+    ? toolsFor({ images: canSeeImages }).filter((tool) => LOOKING_TOOLS.has(tool.function.name))
+    : [...toolsFor({ images: canSeeImages }), ...(moreTools?.tools ?? [])];
   return { messages: canSeeImages ? messages : withoutImages(messages), tools };
 }
 
@@ -290,9 +319,10 @@ async function requestReply({
   modelInfo = null,
   effort = null,
   moreTools = null,
+  readOnly = false,
 }) {
   onActivity?.({ type: "waiting" });
-  const request = forModel(messages, canSeeImages, moreTools);
+  const request = forModel(messages, { canSeeImages, moreTools, readOnly });
   const measure = (usage) => {
     context?.measure(request.messages, usage);
     onUsage?.(usage);
@@ -357,6 +387,7 @@ export async function compactMessages({
   modelInfo,
   effort,
   moreTools,
+  readOnly,
 }) {
   if (upTo < 2) return 0;
   const request = [...messages.slice(0, upTo), { role: "user", content: SUMMARY_REQUEST }];
@@ -378,6 +409,7 @@ export async function compactMessages({
     modelInfo,
     effort,
     moreTools,
+    readOnly,
   });
   signal?.throwIfAborted();
   if (reply.stop === "refusal") throw refusalError(model, reply.refusal);
@@ -456,6 +488,11 @@ async function makeRoom({ taskStart, overflowed = false, ...options }) {
  * `moreTools` offers the model tools besides the agent's own, like MCP servers' (see mcp.mjs):
  * { tools (defined as in tools.mjs), has(name), run(name, args, { signal }) }, where run resolves
  * as runTool does. They are confirmed like the agent's own, and refused in plan mode.
+ * The subagent tool starts a helper: a turn of its own, in a conversation of its own, with the
+ * same model and only the tools that look around (`readOnly`). The model gets its reply; the
+ * user hears of its tool calls through the same callbacks, with a third argument,
+ * { subagent: true }, and of what it waits on with `subagent: true` in the activity.
+ * `onNotice` hears { type: "stopped", rounds } when the turn stops after `maxRounds`.
  * Aborting `signal` stops the turn and rejects with the signal's reason. Every tool call
  * already in `messages` still gets a result, so the conversation can continue afterwards.
  */
@@ -484,6 +521,7 @@ export async function agentTurn({
   modelInfo = null,
   effort = null,
   moreTools = null,
+  readOnly = false,
 }) {
   let taskStart = messages.length;
   const text = planMode ? `${PLAN_NOTE}\n\n${task}` : task;
@@ -505,7 +543,10 @@ export async function agentTurn({
     modelInfo,
     effort,
     moreTools,
+    readOnly,
   };
+  const helper = { openai, claude, model, canSeeImages, sessionId, modelInfo, effort, maxRounds, context, signal, confirmTool, onToolCall, onToolResult, onUsage, onActivity, onNotice };
+  const runSubagent = (args) => subagentTurn(args, helper);
 
   for (let i = 0; i < maxRounds; i++) {
     signal?.throwIfAborted();
@@ -538,7 +579,7 @@ export async function agentTurn({
     const last = message.tool_calls.at(-1);
     for (const call of message.tool_calls) {
       const cutOff = reply.stop === "cut_off" && call === last;
-      const result = await callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode, moreTools, cutOff });
+      const result = await callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode, readOnly, moreTools, runSubagent, cutOff });
       messages.push({ role: "tool", tool_call_id: call.id, content: result.content });
       if (result.parts) parts.push(...result.parts);
       onToolResult?.(call.function.name, result);
@@ -547,7 +588,35 @@ export async function agentTurn({
   }
 
   signal?.throwIfAborted();
+  onNotice?.({ type: "stopped", rounds: maxRounds });
   const stopped = `Stopped after ${maxRounds} tool rounds. Say "continue" to keep going.`;
   onToken?.(stopped);
   return stopped;
+}
+
+// Runs a helper for the subagent tool (see agentTurn): its own conversation, the same model, the
+// tools that look around, and a context window of its own size. Resolves to its reply, for the
+// model; throws if it ran out of tool rounds, with what it had written by then.
+async function subagentTurn({ task }, { context, onToolCall, onToolResult, onActivity, onNotice, ...turn }) {
+  let stopped = false;
+  const messages = [{ role: "system", content: subagentPrompt() }];
+  const reply = await agentTurn({
+    ...turn,
+    task,
+    messages,
+    readOnly: true,
+    context: context ? new ContextWindow({ limit: context.limit }) : undefined,
+    onToolCall: (name, args) => onToolCall?.(name, args, { subagent: true }),
+    onToolResult: (name, result) => onToolResult?.(name, result, { subagent: true }),
+    onActivity: (activity) => onActivity?.({ ...activity, subagent: true }),
+    onNotice: (notice) => {
+      if (notice.type === "stopped") stopped = true;
+      else onNotice?.(notice);
+    },
+  });
+  if (stopped) {
+    const notes = messages.findLast((message) => message.role === "assistant" && typeof message.content === "string" && message.content.trim())?.content.trim();
+    throw new Error(`the helper stopped after ${turn.maxRounds} tool rounds without finishing: ask it something narrower, or look yourself.${notes ? ` Its last notes: ${notes}` : ""}`);
+  }
+  return reply.trim() || "(the helper replied with nothing)";
 }

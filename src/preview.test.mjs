@@ -49,6 +49,12 @@ describe("previewToolCall", () => {
     ]);
   });
 
+  it("names a helper by what it does, and shows the start of its report", () => {
+    expect(previewToolCall("subagent", { description: "Find the loader", task: "Find where config is loaded" })).toEqual({ summary: "Find the loader", lines: [] });
+    expect(previewToolCall("subagent", { task: "Find where config is loaded\nand by what" })).toEqual({ summary: "Find where config is loaded", lines: [] });
+    expect(previewToolResult("subagent", { status: "ok", content: "Loaded in src/config.js:12." })).toEqual([{ kind: "output", text: "Loaded in src/config.js:12." }]);
+  });
+
   it("shows a to-do list a step a line, with how many are done", () => {
     const todos = [
       { content: "Read the parser", status: "completed" },

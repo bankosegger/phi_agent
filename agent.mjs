@@ -423,6 +423,7 @@ function runningText({ name, args }) {
   if (name === "process_output") return `Waiting for output from process ${args?.id}`;
   if (name === "stop_process") return `Stopping process ${args?.id}`;
   if (name === "fetch_url") return `Fetching ${URL.parse(args?.url)?.host ?? "the page"}`;
+  if (name === "subagent") return "Starting a helper";
   return `Running ${toolLabel(name)}`;
 }
 
@@ -430,6 +431,8 @@ function runningText({ name, args }) {
 let toolStartedAt = 0;
 
 function activityText(activity) {
+  // What a helper (the subagent tool) is doing: "Helper · Find the config loader", or the tool it runs.
+  if (activity.subagent) return `Helper · ${activity.type === "waiting" ? helper.about : activityText({ ...activity, subagent: false })}`;
   if (activity.type === "waiting") return currentStep ?? "Thinking";
   if (activity.type === "compacting") return "Summarizing the conversation to free up context";
   if (activity.type === "running") return runningText(activity);
@@ -457,9 +460,27 @@ function followTodos(args) {
   currentStep = index >= 0 ? `Step ${index + 1} of ${todos.length}: ${String(todos[index].content ?? "").trim()}` : null;
 }
 
-function showToolCall(name, args) {
+// The helper (see the subagent tool) at work now, if any: what it does, when it started, and how
+// many tool calls it made, for the line after it.
+const helper = { about: "Looking around", startedAt: 0, calls: 0 };
+
+// A helper's tool call, under the helper's line: dimmed, and without what it would show under it.
+function showHelperCall(name, args) {
+  helper.calls++;
+  print(`  ${toolCallLine(name, previewToolCall(name, args).summary)}`);
+}
+
+// How a helper's tool call went, when it didn't: an error, or that the user skipped it.
+function showHelperResult(name, result) {
+  if (result.status === "skipped") print(`    ${theme.muted(`${glyphs.skip} Skipped`)}`);
+  else if (result.status === "error") printLines(detailLines(previewToolResult(name, result)).map((line) => `  ${line}`));
+}
+
+function showToolCall(name, args, { subagent = false } = {}) {
   status.stop();
+  if (subagent) return showHelperCall(name, args);
   if (name === "todo_write") followTodos(args);
+  if (name === "subagent") Object.assign(helper, { about: String(args?.description || "Looking around").trim(), startedAt: Date.now(), calls: 0 });
   const { summary, lines } = previewToolCall(name, args);
   startBlock(lines.length ? "details" : "tool");
   print(toolCallLine(name, summary));
@@ -467,9 +488,12 @@ function showToolCall(name, args) {
   toolStartedAt = Date.now();
 }
 
-function showToolResult(name, result) {
+function showToolResult(name, result, { subagent = false } = {}) {
   status.stop();
+  if (subagent) return showHelperResult(name, result);
   const lines = previewToolResult(name, result);
+  // A helper's report, and how much it took to find.
+  if (name === "subagent" && result.status === "ok") lines.push({ kind: "ok", text: `${plural(helper.calls, "tool call")} · ${formatDuration(Date.now() - helper.startedAt)}` });
   // A command says how long it took, and that it worked when it did. (A command started in the
   // background ends with a note on how it is doing instead.)
   if (name === "shell" && result.status === "ok") {
@@ -745,9 +769,9 @@ async function runTask(task, { title = task, model: taskModel = model } = {}) {
       confirmTool,
       signal: controller.signal,
       onToolCall: showToolCall,
-      onToolResult: (name, result) => {
+      onToolResult: (name, result, nested) => {
         if (name === "write_asset" && result.status === "ok") saved.push(result.content.replace(/^saved to /, ""));
-        showToolResult(name, result);
+        showToolResult(name, result, nested);
       },
       onUsage: (requestUsage) => addUsage(usage, requestUsage),
       onToken: (token) => {
@@ -1232,13 +1256,13 @@ async function runPrint() {
       confirmTool,
       signal: controller.signal,
       onToken: (token) => (progress += token),
-      onToolCall: (name, args) => {
+      onToolCall: (name, args, nested) => {
         if (progress.trim()) {
           startBlock("text");
           print(info(progress.trim()));
         }
         progress = "";
-        showToolCall(name, args);
+        showToolCall(name, args, nested);
       },
       onToolResult: showToolResult,
       onUsage: (requestUsage) => addUsage(usage, requestUsage),

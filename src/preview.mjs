@@ -303,6 +303,11 @@ export function previewToolCall(name, args) {
     return { summary: `.agent/assets/${args.path} (${count})`, lines: previewLines(lines, "add") };
   }
 
+  // A helper (the subagent tool) is named by what it does.
+  if (name === "subagent") {
+    return { summary: clip(String(args.description || args.task || "").trim().split("\n")[0]), lines: [] };
+  }
+
   // An MCP server's tool (see mcp.mjs) can do anything, so what it is given shows in full enough
   // to decide on: an argument a line.
   if (/^mcp__/.test(name)) {
@@ -346,8 +351,8 @@ export function previewToolResult(name, { status, content }) {
     const title = content.match(/^Title: (.+)/)?.[1];
     return title ? [{ kind: "note", text: clip(title) }] : [];
   }
-  // An MCP server's answer: its first lines.
-  if (status === "ok" && /^mcp__/.test(name)) {
+  // An MCP server's answer, or a helper's report: its first lines.
+  if (status === "ok" && (/^mcp__/.test(name) || name === "subagent")) {
     const lines = splitLines(content.trim()).filter((line) => line.trim());
     const shown = lines.slice(0, MCP_RESULT_LINES).map((line) => ({ kind: "output", text: clip(line) }));
     if (lines.length > MCP_RESULT_LINES) shown.push({ kind: "note", text: `… ${lines.length - MCP_RESULT_LINES} more lines` });

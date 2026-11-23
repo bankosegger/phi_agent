@@ -60,6 +60,7 @@ export const TOOL_LABELS = {
   delete_file: "Delete",
   move_file: "Move",
   todo_write: "To-dos",
+  subagent: "Helper",
 };
 
 // Tools that only look around. Their calls are shown quietly; calls that change things stand out.

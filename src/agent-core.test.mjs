@@ -411,6 +411,121 @@ describe("agentTurn plan mode", () => {
   });
 });
 
+describe("agentTurn helpers (the subagent tool)", () => {
+  const messages = () => createMessages({ instructions: null, userInstructions: null });
+
+  it("runs a helper in a conversation of its own, with the tools that look around, and gives the model its reply", async () => {
+    await inTempDir(async () => {
+      writeFileSync("notes.txt", "x = 1\n");
+      const openai = fakeOpenai([
+        [toolCallDelta(0, "subagent", { description: "Find x", task: "Find where x is set" })],
+        [toolCallDelta(0, "read_file", { path: "notes.txt" })], // the helper
+        [{ content: "x is set in notes.txt:1" }], // the helper's reply
+        [{ content: "x is set in notes.txt." }],
+      ]);
+      const calls = [];
+      const results = [];
+      const conversation = messages();
+
+      const reply = await agentTurn({
+        task: "where is x set?",
+        openai,
+        messages: conversation,
+        context: new ContextWindow({ limit: 100_000 }),
+        confirmTool: async () => true,
+        onToolCall: (name, args, nested) => calls.push([name, nested?.subagent ?? false]),
+        onToolResult: (name, { status, content }, nested) => results.push([name, status, content, nested?.subagent ?? false]),
+      });
+
+      expect(reply).toBe("x is set in notes.txt.");
+      // The helper started afresh, with its own prompt and only the task, and the tools that look around.
+      const helper = openai.bodies[1];
+      expect(helper.messages[0].content).toMatch(/^You are a helper of a coding agent/);
+      expect(helper.messages.slice(1)).toEqual([{ role: "user", content: "Find where x is set" }]);
+      const tools = helper.tools.map((tool) => tool.function.name);
+      expect(tools).toContain("read_file");
+      for (const name of ["write_file", "shell", "subagent", "todo_write"]) expect(tools).not.toContain(name);
+
+      expect(calls).toEqual([
+        ["subagent", false],
+        ["read_file", true],
+      ]);
+      expect(results).toEqual([
+        ["read_file", "ok", expect.stringContaining("x = 1"), true],
+        ["subagent", "ok", "x is set in notes.txt:1", false],
+      ]);
+      // The conversation keeps the helper's report, not what it read.
+      expect(JSON.stringify(conversation)).not.toContain("x = 1");
+    });
+  });
+
+  it("lets a helper only look around: no changes, commands, or helpers of its own", async () => {
+    await inTempDir(async () => {
+      const openai = fakeOpenai([
+        [toolCallDelta(0, "subagent", { task: "Fix it" })],
+        [toolCallDelta(0, "write_file", { path: "src/a.js", content: "x" }), toolCallDelta(1, "shell", { cmd: "echo hi" }), toolCallDelta(2, "subagent", { task: "deeper" })],
+        [{ content: "I can't change anything." }],
+        [{ content: "Done." }],
+      ]);
+      const results = [];
+      await agentTurn({
+        task: "fix it",
+        openai,
+        messages: messages(),
+        confirmTool: async () => true,
+        onToolCall: () => {},
+        onToolResult: (name, { status, content }, nested) => nested && results.push([name, status, content]),
+      });
+      const refusal = "error: a helper only looks around: it can't change files or run commands";
+      expect(results).toEqual([
+        ["write_file", "error", refusal],
+        ["shell", "error", refusal],
+        ["subagent", "error", refusal],
+      ]);
+      expect(existsSync("src/a.js")).toBe(false);
+    });
+  });
+
+  it("says when a helper ran out of tool rounds, with what it had written", async () => {
+    const openai = fakeOpenai([
+      [toolCallDelta(0, "subagent", { task: "Look everywhere" })],
+      [{ content: "Checking the README first." }, toolCallDelta(0, "list_dir", {})],
+      [toolCallDelta(0, "list_dir", {})],
+      [{ content: "It couldn't finish." }],
+    ]);
+    const results = [];
+    await agentTurn({
+      task: "look",
+      openai,
+      maxRounds: 2,
+      messages: messages(),
+      confirmTool: async () => true,
+      onToolCall: () => {},
+      onToolResult: (name, { status, content }, nested) => !nested && results.push([name, status, content]),
+    });
+    expect(results).toEqual([
+      ["subagent", "error", "error: the helper stopped after 2 tool rounds without finishing: ask it something narrower, or look yourself. Its last notes: Checking the README first."],
+    ]);
+  });
+
+  it("runs helpers in plan mode, as they only look around", async () => {
+    const openai = fakeOpenai([[toolCallDelta(0, "subagent", { task: "Look" })], [{ content: "Found it." }], [{ content: "Plan: …" }]]);
+    const results = [];
+    await agentTurn({
+      task: "plan",
+      planMode: true,
+      openai,
+      messages: messages(),
+      confirmTool: async () => true,
+      onToolCall: () => {},
+      onToolResult: (name, { status, content }) => results.push([name, status, content]),
+    });
+    expect(results).toEqual([["subagent", "ok", "Found it."]]);
+    // The helper isn't told it plans: it only looks.
+    expect(openai.bodies[1].messages[1].content).toBe("Look");
+  });
+});
+
 describe("agentTurn with more tools", () => {
   it("offers them with the agent's own, asks about them, and runs them, images and all", async () => {
     const echo = { type: "function", function: { name: "mcp__fake__echo", description: "Says it back", parameters: { type: "object", properties: { text: { type: "string" } } } } };

@@ -402,6 +402,8 @@ export function isSecretFile(path) {
  */
 export function needsConfirmation(name, args) {
   if (name === "read_file" || name === "grep") return isSecretFile(args?.path);
+  // An MCP server's tool (see mcp.mjs) can do anything the server can.
+  if (/^mcp__/.test(String(name))) return true;
   return CONFIRMED_TOOLS.has(name);
 }
 

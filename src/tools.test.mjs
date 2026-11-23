@@ -84,6 +84,8 @@ describe("needsConfirmation", () => {
     expect(needsConfirmation("delete_file")).toBe(true);
     expect(needsConfirmation("move_file")).toBe(true);
     expect(needsConfirmation("fetch_url")).toBe(true);
+    // An MCP server's tool can do anything the server can.
+    expect(needsConfirmation("mcp__github__get_issue", {})).toBe(true);
     expect(needsConfirmation("read_file")).toBe(false);
     expect(needsConfirmation("list_dir")).toBe(false);
     expect(needsConfirmation("grep")).toBe(false);

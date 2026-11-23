@@ -376,6 +376,23 @@ describe("agentTurn plan mode", () => {
     });
   });
 
+  it("refuses tools besides the agent's own, like an MCP server's", async () => {
+    const moreTools = { tools: [], has: (name) => name === "mcp__fake__write", run: async () => ({ content: "written" }) };
+    const openai = fakeOpenai([[toolCallDelta(0, "mcp__fake__write", {})], [{ content: "Plan." }]]);
+    const results = [];
+    await agentTurn({
+      task: "plan it",
+      planMode: true,
+      openai,
+      moreTools,
+      messages: createMessages({ instructions: null, userInstructions: null }),
+      confirmTool: async () => true,
+      onToolCall: () => {},
+      onToolResult: (name, { status, content }) => results.push([name, status, content]),
+    });
+    expect(results).toEqual([["mcp__fake__write", "error", expect.stringMatching(/^error: plan mode is on/)]]);
+  });
+
   it("keeps a to-do list, which changes nothing", async () => {
     const todos = [{ content: "Change notes.txt", status: "pending" }];
     const openai = fakeOpenai([[toolCallDelta(0, "todo_write", { todos })], [{ content: "Plan: change notes.txt." }]]);
@@ -391,6 +408,42 @@ describe("agentTurn plan mode", () => {
       onToolResult: (name, { status, content }) => results.push([name, status, content]),
     });
     expect(results).toEqual([["todo_write", "ok", "The to-do list is updated: 0 of 1 done."]]);
+  });
+});
+
+describe("agentTurn with more tools", () => {
+  it("offers them with the agent's own, asks about them, and runs them, images and all", async () => {
+    const echo = { type: "function", function: { name: "mcp__fake__echo", description: "Says it back", parameters: { type: "object", properties: { text: { type: "string" } } } } };
+    const image = { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } };
+    const moreTools = {
+      tools: [echo],
+      has: (name) => name === "mcp__fake__echo",
+      run: async (name, args, { signal }) => ({ content: `${args.text}${signal ? "" : " (no signal)"}`, parts: [image] }),
+    };
+    const openai = fakeOpenai([[toolCallDelta(0, "mcp__fake__echo", { text: "hello" })], [{ content: "It said hello." }]]);
+    const asked = [];
+    const results = [];
+    const messages = createMessages({ instructions: null, userInstructions: null });
+
+    const reply = await agentTurn({
+      task: "say hello",
+      openai,
+      moreTools,
+      messages,
+      signal: new AbortController().signal,
+      confirmTool: async (name) => asked.push(name) > 0,
+      onToolCall: () => {},
+      onToolResult: (name, { status, content }) => results.push([name, status, content]),
+    });
+
+    expect(reply).toBe("It said hello.");
+    const offered = openai.bodies[0].tools.map((tool) => tool.function.name);
+    expect(offered).toContain("read_file");
+    expect(offered.at(-1)).toBe("mcp__fake__echo");
+    expect(asked).toEqual(["mcp__fake__echo"]);
+    expect(results).toEqual([["mcp__fake__echo", "ok", "hello"]]);
+    // The image follows the results, as view_image's does.
+    expect(messages.at(-2)).toEqual({ role: "user", content: [image] });
   });
 });
 

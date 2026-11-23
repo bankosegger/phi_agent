@@ -34,6 +34,7 @@ import { PERMISSIONS_FILE, allows, loadRules, ruleFor, saveRules } from "./src/p
 import { runInSandbox } from "./src/sandbox.mjs";
 import { loadSettings } from "./src/settings.mjs";
 import { commandStatus, fitLine, gitState, statusText } from "./src/statusline.mjs";
+import { McpServers } from "./src/mcp.mjs";
 import { deleteSession, listSessions, loadHistory, loadSession, newSessionFile, saveHistory, saveSession, searchSessions } from "./src/sessions.mjs";
 import { createStatus } from "./src/status.mjs";
 import { displayWidth, glyphs, hasColors, theme, truncateEnd } from "./src/theme.mjs";
@@ -56,6 +57,7 @@ import {
   questionLine,
   taskFooter,
   toolCallLine,
+  toolLabel,
 } from "./src/ui.mjs";
 
 // Settings come from the .env next to this file, not the current directory, so the agent
@@ -163,8 +165,13 @@ if (!settings.effort && process.env.EFFORT?.trim() && !envEffort) {
 }
 const effort = settings.effort ?? envEffort;
 
+// The MCP servers in the user's own settings (see mcp.mjs) start with the agent, in the
+// background; a task waits a while for them (see waitForMcp), so their tools are there.
+const mcp = new McpServers(settings.mcpServers ?? {}, { cwd: process.cwd(), clientVersion: VERSION ?? "1.0.0" });
+mcp.start();
+
 // For Tab completion.
-const COMMANDS = ["/help", "/clear", "/resume", "/compact", "/undo", "/plan", "/model", "/processes", "/stop", "/permissions", "/exit", "/quit"];
+const COMMANDS = ["/help", "/clear", "/resume", "/compact", "/undo", "/plan", "/model", "/processes", "/stop", "/permissions", "/mcp", "/exit", "/quit"];
 
 // The user's own slash commands (see commands.mjs), read afresh each time, so a command file
 // that was added or changed works at once.
@@ -177,8 +184,11 @@ let planMode = options.plan;
 
 // Background processes the model started end with the agent, however it ends. (Quitting
 // normally stops them before this.) On POSIX they have their own process group, so closing
-// the terminal wouldn't stop them otherwise.
-process.on("exit", () => backgroundProcesses.killAll());
+// the terminal wouldn't stop them otherwise. So do the MCP servers.
+process.on("exit", () => {
+  backgroundProcesses.killAll();
+  mcp.close();
+});
 for (const [signal, code] of [
   ["SIGTERM", 143],
   ["SIGHUP", 129],
@@ -413,7 +423,7 @@ function runningText({ name, args }) {
   if (name === "process_output") return `Waiting for output from process ${args?.id}`;
   if (name === "stop_process") return `Stopping process ${args?.id}`;
   if (name === "fetch_url") return `Fetching ${URL.parse(args?.url)?.host ?? "the page"}`;
-  return `Running ${name}`;
+  return `Running ${toolLabel(name)}`;
 }
 
 // When the tool call running now started, for how long a command took.
@@ -524,7 +534,7 @@ const settingsRules = settings.allow ?? [];
 function describeRule(rule) {
   if (rule.startsWith("shell: ")) return `commands that start with "${rule.slice(7)}" run`;
   if (rule.startsWith("fetch_url: ")) return `pages on ${rule.slice(11)} are fetched`;
-  return `${rule} runs`;
+  return `${toolLabel(rule)} runs`;
 }
 
 function allowForGood(rule) {
@@ -627,9 +637,40 @@ function showFooter(usage, startedAt) {
 
 // How the agent reaches a model (by default, the one in use), for agentTurn and compactMessages.
 // `maxRounds` ("maxToolRounds" in a settings file) is for agentTurn: unset, it takes
-// MAX_TOOL_ROUNDS from .env, or its default.
+// MAX_TOOL_ROUNDS from .env, or its default. The MCP servers' tools come with the agent's own.
 function modelOptions(name = model) {
-  return { openai, claude, model: name, sessionId, modelInfo: aboutModel(name), effort, canSeeImages: canSeeImages(name), maxRounds: settings.maxToolRounds };
+  return {
+    openai,
+    claude,
+    model: name,
+    sessionId,
+    modelInfo: aboutModel(name),
+    effort,
+    canSeeImages: canSeeImages(name),
+    maxRounds: settings.maxToolRounds,
+    moreTools: mcp.servers.length ? mcp : null,
+  };
+}
+
+// How long the first task waits for the MCP servers to start; one that starts later has its tools
+// from the next request on.
+const MCP_WAIT_MS = 15_000;
+let mcpWaited = false;
+
+// Before the first task: waits for the MCP servers to start (or `signal` to abort), and says which
+// couldn't, once.
+async function waitForMcp(signal) {
+  if (mcpWaited || !mcp.servers.length) return;
+  if (mcp.servers.some((server) => server.state === "starting")) {
+    if (status.enabled) status.set("Starting the MCP servers");
+    await Promise.race([mcp.ready(MCP_WAIT_MS), new Promise((resolve) => signal?.addEventListener("abort", resolve, { once: true }))]);
+    status.stop();
+  }
+  if (signal?.aborted) return;
+  mcpWaited = true;
+  for (const server of mcp.servers.filter(({ state }) => state === "failed")) {
+    print(warning(`The ${server.name} MCP server isn't running: ${server.error?.message ?? "it failed"}. /mcp lists the servers.`));
+  }
 }
 
 function showError(error, signal) {
@@ -692,6 +733,7 @@ async function runTask(task, { title = task, model: taskModel = model } = {}) {
   if (taskModel !== model) context.limit = aboutModel(taskModel)?.contextLength ?? null;
 
   try {
+    await waitForMcp(controller.signal);
     const reply = await agentTurn({
       ...modelOptions(taskModel),
       task,
@@ -809,6 +851,27 @@ async function compact() {
     endLine();
   }
   showFooter(usage, startedAt);
+}
+
+// /mcp: the MCP servers, how each is doing, and the tools of those that run.
+function showMcp() {
+  if (!mcp.servers.length) {
+    print(info('No MCP servers. Add them to "mcpServers" in your own ~/.phi-agent/settings.json; the README says how.'));
+    return;
+  }
+  print(theme.strong("MCP servers"));
+  const width = lineWidth(output.columns);
+  for (const server of mcp.servers) {
+    const state =
+      server.state === "ready"
+        ? theme.success(`${glyphs.ok} ${plural(server.tools.length, "tool")}`)
+        : server.state === "starting"
+          ? info("starting…")
+          : theme.danger(`${glyphs.fail} ${server.error?.message ?? server.state}`);
+    print(truncateEnd(`  ${theme.accent(server.name)}  ${state}`, width));
+    if (server.state === "ready" && server.tools.length) print(info(truncateEnd(`     ${nameList(server.tools.map((tool) => tool.name), 8)}`, width)));
+  }
+  print(info("Their tools ask before they run; answer a to allow one for good. The model sees them as mcp__<server>__<tool>."));
 }
 
 function processState(proc) {
@@ -1051,6 +1114,8 @@ async function runCommand(line) {
         ? `${theme.plan("Plan mode on:")} ${info("the agent looks around and replies with a plan, changing nothing.")}`
         : `${theme.success("Plan mode off:")} ${info("the agent can make changes again (they still ask first).")}`,
     );
+  } else if (command === "/mcp") {
+    showMcp();
   } else if (command === "/processes") {
     showProcesses();
   } else if (command === "/stop") {
@@ -1155,6 +1220,7 @@ async function runPrint() {
   let exitCode = 0;
 
   try {
+    await waitForMcp(controller.signal);
     const reply = await agentTurn({
       ...modelOptions(),
       task,
@@ -1305,8 +1371,13 @@ async function runInteractive() {
   userInput.close();
 }
 
-if (HEADLESS) {
-  process.exitCode = await runPrint();
-} else {
-  await runInteractive();
+try {
+  if (HEADLESS) {
+    process.exitCode = await runPrint();
+  } else {
+    await runInteractive();
+  }
+} finally {
+  // The MCP servers' pipes would keep the agent from ending.
+  mcp.close();
 }

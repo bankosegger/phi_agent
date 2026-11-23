@@ -117,10 +117,33 @@ Settings for one project go in its `.phi-agent/settings.json`, which git can sha
 | `bell` | `false` silences the terminal's bell | `BELL=off` |
 | `statusLine` | `false` hides the [status line](#status-line); a command prints your own — only in your own file | |
 | `allow` | Tool calls that run without asking, as [permission rules](#permissions) — only in your own file | answering `a` |
+| `mcpServers` | [MCP servers](#mcp-servers) whose tools the model gets — only in your own file | |
 
 The project's settings win over yours, and both win over `.env`; options on the command line, like `--model`, win over all of them. The banner names the settings files in use, and the agent says what it can't use in one, like a misspelled setting, and uses the rest. They are read when the agent starts.
 
-Anyone can commit a project's settings, so they can't loosen what you decided: only your own file can allow tool calls or run a command for the status line, and a project's `"sandbox": false` doesn't turn off a sandbox asked for anywhere else. `/permissions` lists your own file's rules with the project's.
+Anyone can commit a project's settings, so they can't loosen what you decided: only your own file can allow tool calls, start MCP servers or run a command for the status line, and a project's `"sandbox": false` doesn't turn off a sandbox asked for anywhere else. `/permissions` lists your own file's rules with the project's.
+
+### MCP servers
+
+[MCP](https://modelcontextprotocol.io) servers give the model more tools: for GitHub, a database, a browser, your notes. Add the ones you want to `"mcpServers"` in your own `~/.phi-agent/settings.json`, each with the command that starts it:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "…" }
+    }
+  }
+}
+```
+
+The servers start with the agent, in the project folder, which they are told is the folder to work in. Your API keys are left out of their environment, and `env` adds to it. The first task waits up to 15 seconds for them, and the agent says which couldn't start.
+
+The model gets their tools as `mcp__<server>__<tool>`. A call shows as `● github/create_issue`, with its arguments under it, and asks first, since an MCP tool can do whatever its server can: answer `a` to allow that tool for good in the project, or put its name in `"allow"`, like `"mcp__github__get_issue"`. Plan mode refuses them. What a tool returns goes to the model as text, up to 20,000 characters, and its images too, for a model that sees images.
+
+`/mcp` lists the servers, whether each runs or why it doesn't, and their tools. `"disabled": true` keeps a server in the file without starting it. Only servers started with a command work yet, not ones at a URL. On Windows, a command like `npx`, which is a `.cmd` file, runs through `cmd.exe`, with its arguments quoted for it. In the [Docker sandbox](#docker-sandbox), the servers start in the container, so their commands and paths have to work on Linux there.
 
 ### Status line
 
@@ -162,6 +185,7 @@ With an `anthropic/` model on OpenRouter, the agent marks the prompt for caching
 | `/processes` | List the commands the agent left running in the background |
 | `/stop <n>`, `/stop all` | Stop background process n, or all of them |
 | `/permissions` | List what runs without asking; `/permissions remove <n>` takes one back |
+| `/mcp` | List the MCP servers, whether each runs, and their tools (see [MCP servers](#mcp-servers)) |
 | `/exit`, `/quit` | Quit |
 | Ctrl+C while the agent works | Cancel the current task and return to the prompt |
 | Ctrl+C at the prompt | Clear what you typed; with nothing typed, quit (Ctrl+D quits too) |

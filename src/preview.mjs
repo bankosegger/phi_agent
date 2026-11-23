@@ -303,8 +303,20 @@ export function previewToolCall(name, args) {
     return { summary: `.agent/assets/${args.path} (${count})`, lines: previewLines(lines, "add") };
   }
 
+  // An MCP server's tool (see mcp.mjs) can do anything, so what it is given shows in full enough
+  // to decide on: an argument a line.
+  if (/^mcp__/.test(name)) {
+    const entries = Object.entries(args);
+    const lines = entries.slice(0, MAX_MCP_ARGUMENTS).map(([key, value]) => ({ kind: "note", text: clip(`${key}: ${JSON.stringify(value)}`) }));
+    if (entries.length > MAX_MCP_ARGUMENTS) lines.push({ kind: "note", text: `… ${entries.length - MAX_MCP_ARGUMENTS} more` });
+    return { summary: "", lines };
+  }
+
   return { summary: JSON.stringify(args), lines: [] };
 }
+
+const MAX_MCP_ARGUMENTS = 12;
+const MCP_RESULT_LINES = 3;
 
 // The status line a command's output ends with (see formatResult and processStatus in
 // tools.mjs), as a preview line: an error for "[exit code 1]", "[timed out after 5s]",
@@ -333,6 +345,13 @@ export function previewToolResult(name, { status, content }) {
   if (status === "ok" && name === "fetch_url") {
     const title = content.match(/^Title: (.+)/)?.[1];
     return title ? [{ kind: "note", text: clip(title) }] : [];
+  }
+  // An MCP server's answer: its first lines.
+  if (status === "ok" && /^mcp__/.test(name)) {
+    const lines = splitLines(content.trim()).filter((line) => line.trim());
+    const shown = lines.slice(0, MCP_RESULT_LINES).map((line) => ({ kind: "output", text: clip(line) }));
+    if (lines.length > MCP_RESULT_LINES) shown.push({ kind: "note", text: `… ${lines.length - MCP_RESULT_LINES} more lines` });
+    return shown;
   }
   if (status !== "ok" || !OUTPUT_TOOLS.has(name)) return [];
 

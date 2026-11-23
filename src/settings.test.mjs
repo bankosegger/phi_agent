@@ -58,6 +58,38 @@ describe("loadSettings", () => {
     );
   });
 
+  it("starts MCP servers from the user's own file only, each checked", () => {
+    const mcpServers = {
+      github: { command: " npx ", args: ["-y", "@modelcontextprotocol/server-github"], env: { GITHUB_TOKEN: "t" } },
+      plain: { command: "node", args: ["server.js"] },
+      off: { command: "node", disabled: true },
+      remote: { url: "https://mcp.example.com/mcp" },
+      "bad name": { command: "x" },
+      noCommand: { args: ["x"] },
+      badArgs: { command: "x", args: "--flag" },
+      badEnv: { command: "x", env: { PORT: 3000 } },
+    };
+    withFolders({ project: { mcpServers }, home: { mcpServers } }, ({ cwd, home }) => {
+      const { settings, problems } = loadSettings({ cwd, home });
+      expect(settings.mcpServers).toEqual({
+        github: { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], env: { GITHUB_TOKEN: "t" } },
+        plain: { command: "node", args: ["server.js"], env: {} },
+      });
+      expect(problems).toEqual([
+        `.phi-agent/settings.json: "mcpServers" only counts in your own ~/.phi-agent/settings.json: a project's settings can't start programs`,
+        '~/.phi-agent/settings.json: the MCP server "remote" is at a URL: only servers started with a command work yet',
+        '~/.phi-agent/settings.json: the MCP server "bad name" needs a name of letters, digits, - and _',
+        '~/.phi-agent/settings.json: the MCP server "noCommand" needs a "command", like "npx"',
+        `~/.phi-agent/settings.json: the MCP server "badArgs"'s "args" should be a list of strings`,
+        `~/.phi-agent/settings.json: the MCP server "badEnv"'s "env" should be an object of strings, like { "TOKEN": "…" }`,
+      ]);
+    });
+    // An MCP server's tool can be allowed by its name.
+    withFolders({ home: { allow: ["mcp__github__get_issue"] } }, ({ cwd, home }) => {
+      expect(loadSettings({ cwd, home })).toMatchObject({ settings: { allow: ["mcp__github__get_issue"] }, problems: [] });
+    });
+  });
+
   it("only lets the user's own file allow tool calls", () => {
     withFolders({ project: { allow: ["shell: curl"], model: "openai/gpt-5-mini" } }, ({ cwd, home }) => {
       const { settings, problems } = loadSettings({ cwd, home });
@@ -107,7 +139,7 @@ describe("loadSettings", () => {
           '.phi-agent/settings.json: "model" should be a model ID, like claude-opus-5-5',
           '.phi-agent/settings.json: "effort" should be one of low, medium, high, xhigh, max',
           '.phi-agent/settings.json: "maxToolRounds" should be a whole number from 1 up',
-          '.phi-agent/settings.json: "theme" isn\'t a setting; there are model, effort, maxToolRounds, sandbox, bell, statusLine, allow',
+          '.phi-agent/settings.json: "theme" isn\'t a setting; there are model, effort, maxToolRounds, sandbox, bell, statusLine, allow, mcpServers',
           '.phi-agent/settings.json: "sandbox" should be true or false',
           '~/.phi-agent/settings.json: "shell" needs the start of a command, like "shell: npm test"',
           '~/.phi-agent/settings.json: "fetch_url: " needs a site, like "fetch_url: docs.python.org"',
@@ -140,7 +172,7 @@ describe("loadSettings", () => {
   });
 
   it("reads a file saved with a byte order mark, as some Windows editors save them", () => {
-    withFolders({ project: '﻿{ "model": "claude-opus-5-5" }' }, ({ cwd, home }) => {
+    withFolders({ project: `${String.fromCharCode(0xfeff)}{ "model": "claude-opus-5-5" }` }, ({ cwd, home }) => {
       expect(loadSettings({ cwd, home })).toMatchObject({ settings: { model: "claude-opus-5-5" }, problems: [] });
     });
   });

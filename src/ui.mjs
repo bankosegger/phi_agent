@@ -67,9 +67,19 @@ const LOOKING_TOOLS = new Set(["read_file", "list_dir", "find_files", "grep", "g
 
 const INDENT = "  ";
 
+/**
+ * A tool's name as the user sees it: a verb for the agent's own, like "Edit", and the server and
+ * the tool for an MCP server's, like "github/create_issue" for mcp__github__create_issue.
+ */
+export function toolLabel(name) {
+  if (TOOL_LABELS[name]) return TOOL_LABELS[name];
+  const mcp = String(name).match(/^mcp__(.+?)__(.+)$/);
+  return mcp ? `${mcp[1]}/${mcp[2]}` : name;
+}
+
 /** A tool call's line, like "● Edit src/app.js". */
 export function toolCallLine(name, summary, g = defaultGlyphs) {
-  const label = TOOL_LABELS[name] ?? name;
+  const label = toolLabel(name);
   const text = summary ? ` ${summary}` : "";
   if (LOOKING_TOOLS.has(name)) return theme.muted(`${g.tool} ${label}${text}`);
   return `${theme.accent(g.tool)} ${theme.strong(label)}${text}`;
@@ -127,7 +137,7 @@ const TOOL_NOUNS = { edit_file: "edits", write_file: "file writes", append_file:
 export function ruleScope(rule) {
   if (rule.startsWith("shell: ")) return `"${rule.slice(7)}"`;
   if (rule.startsWith("fetch_url: ")) return rule.slice(11);
-  return TOOL_NOUNS[rule] ?? `${rule} calls`;
+  return TOOL_NOUNS[rule] ?? `${/^mcp__/.test(rule) ? toolLabel(rule) : rule} calls`;
 }
 
 /** A question for the user, like "  ? Delete this? y/N › ", with the answer to go after it. */
@@ -140,7 +150,7 @@ export function questionLine(question, choices = "y/N") {
  * In a narrow terminal, the choices are only named, so that the answer fits on the line.
  */
 export function confirmPrompt(name, args, rule, g = defaultGlyphs, columns = 80) {
-  const question = QUESTIONS[name]?.(args) ?? `Run ${TOOL_LABELS[name] ?? name}?`;
+  const question = QUESTIONS[name]?.(args) ?? `Run ${toolLabel(name)}?`;
   const ask = (choices) => questionLine(question, choices);
   if (!rule) return ask("y/N");
   const full = ask(`y/N · a = always allow ${ruleScope(rule)}`);
@@ -227,6 +237,7 @@ const COMMANDS = [
   ["/processes", "", "List the commands the agent left running in the background"],
   ["/stop", "<n|all>", "Stop background process n, or all of them"],
   ["/permissions", "", "List what runs without asking (/permissions remove <n> takes one back)"],
+  ["/mcp", "", "List the MCP servers and their tools"],
   ["/exit", "", "Quit (also /quit, or Ctrl+D)"],
 ];
 

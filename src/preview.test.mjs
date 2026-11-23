@@ -32,6 +32,23 @@ describe("diffLines", () => {
 });
 
 describe("previewToolCall", () => {
+  it("shows what an MCP server's tool is given, an argument a line, and the start of its answer", () => {
+    const args = Object.fromEntries(Array.from({ length: 14 }, (_, i) => [`k${i}`, i]));
+    const { summary, lines } = previewToolCall("mcp__github__create_issue", { title: "Bug", labels: ["a"], ...args });
+    expect(summary).toBe("");
+    expect(lines.slice(0, 2)).toEqual([
+      { kind: "note", text: 'title: "Bug"' },
+      { kind: "note", text: 'labels: ["a"]' },
+    ]);
+    expect(lines.at(-1)).toEqual({ kind: "note", text: "… 4 more" });
+    expect(previewToolResult("mcp__github__create_issue", { status: "ok", content: "one\n\ntwo\nthree\nfour\n" })).toEqual([
+      { kind: "output", text: "one" },
+      { kind: "output", text: "two" },
+      { kind: "output", text: "three" },
+      { kind: "note", text: "… 1 more lines" },
+    ]);
+  });
+
   it("shows a to-do list a step a line, with how many are done", () => {
     const todos = [
       { content: "Read the parser", status: "completed" },

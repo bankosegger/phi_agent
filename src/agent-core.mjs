@@ -178,7 +178,7 @@ const CUT_OFF_REFUSAL =
 // Resolves to { status: "ok" | "error" | "skipped" | "cancelled", content, parts }, where content
 // is what the model is told, and parts (from view_image) are message parts to show it after.
 // A call that was `cutOff` is only announced.
-async function callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode, cutOff = false }) {
+async function callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode, moreTools, cutOff = false }) {
   const cancelled = { status: "cancelled", content: CANCELLED };
   if (signal?.aborted) return cancelled;
 
@@ -207,7 +207,7 @@ async function callTool(call, { confirmTool, onToolCall, onActivity, signal, cha
 
     // A cancelled shell command still returns its output so far, which the model should see.
     onActivity?.({ type: "running", name, args });
-    const result = await runTool(name, args, { signal, changes });
+    const result = moreTools?.has(name) ? await moreTools.run(name, args, { signal }) : await runTool(name, args, { signal, changes });
     const { content, parts } = typeof result === "object" && result !== null ? result : { content: String(result) };
     return { status: signal?.aborted ? "cancelled" : "ok", content, ...(parts && { parts }) };
   } catch (error) {
@@ -235,9 +235,11 @@ function withoutImages(messages) {
   );
 }
 
-// The messages and tools to send a model, depending on whether it can see images.
-function forModel(messages, canSeeImages) {
-  return canSeeImages ? { messages, tools: toolsFor() } : { messages: withoutImages(messages), tools: toolsFor({ images: false }) };
+// The messages and tools to send a model, depending on whether it can see images, with the tools
+// of `moreTools` (see agentTurn) after the agent's own.
+function forModel(messages, canSeeImages, moreTools = null) {
+  const tools = [...toolsFor({ images: canSeeImages }), ...(moreTools?.tools ?? [])];
+  return { messages: canSeeImages ? messages : withoutImages(messages), tools };
 }
 
 // A request to OpenRouter. Claude caches a prompt only where it is marked, so for Claude models
@@ -287,9 +289,10 @@ async function requestReply({
   sessionId = null,
   modelInfo = null,
   effort = null,
+  moreTools = null,
 }) {
   onActivity?.({ type: "waiting" });
-  const request = forModel(messages, canSeeImages);
+  const request = forModel(messages, canSeeImages, moreTools);
   const measure = (usage) => {
     context?.measure(request.messages, usage);
     onUsage?.(usage);
@@ -353,6 +356,7 @@ export async function compactMessages({
   sessionId,
   modelInfo,
   effort,
+  moreTools,
 }) {
   if (upTo < 2) return 0;
   const request = [...messages.slice(0, upTo), { role: "user", content: SUMMARY_REQUEST }];
@@ -373,6 +377,7 @@ export async function compactMessages({
     sessionId,
     modelInfo,
     effort,
+    moreTools,
   });
   signal?.throwIfAborted();
   if (reply.stop === "refusal") throw refusalError(model, reply.refusal);
@@ -448,6 +453,9 @@ async function makeRoom({ taskStart, overflowed = false, ...options }) {
  * `sessionId`. `onNotice(notice)` hears { type: "cutOff" } when a reply stopped at the model's
  * output limit, and the notices of streamClaudeReply in claude.mjs. When the model declines a
  * request, the turn rejects with an error that says so.
+ * `moreTools` offers the model tools besides the agent's own, like MCP servers' (see mcp.mjs):
+ * { tools (defined as in tools.mjs), has(name), run(name, args, { signal }) }, where run resolves
+ * as runTool does. They are confirmed like the agent's own, and refused in plan mode.
  * Aborting `signal` stops the turn and rejects with the signal's reason. Every tool call
  * already in `messages` still gets a result, so the conversation can continue afterwards.
  */
@@ -475,6 +483,7 @@ export async function agentTurn({
   sessionId = null,
   modelInfo = null,
   effort = null,
+  moreTools = null,
 }) {
   let taskStart = messages.length;
   const text = planMode ? `${PLAN_NOTE}\n\n${task}` : task;
@@ -495,6 +504,7 @@ export async function agentTurn({
     sessionId,
     modelInfo,
     effort,
+    moreTools,
   };
 
   for (let i = 0; i < maxRounds; i++) {
@@ -528,7 +538,7 @@ export async function agentTurn({
     const last = message.tool_calls.at(-1);
     for (const call of message.tool_calls) {
       const cutOff = reply.stop === "cut_off" && call === last;
-      const result = await callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode, cutOff });
+      const result = await callTool(call, { confirmTool, onToolCall, onActivity, signal, changes, planMode, moreTools, cutOff });
       messages.push({ role: "tool", tool_call_id: call.id, content: result.content });
       if (result.parts) parts.push(...result.parts);
       onToolResult?.(call.function.name, result);

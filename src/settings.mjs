@@ -20,17 +20,33 @@ export const SETTINGS_FILE = "settings.json";
 const TOOL_NAMES = new Set(tools.map((tool) => tool.function.name));
 
 // A permission rule (see permissions.mjs) as it is matched, like "shell: npm test" from
-// "shell:npm  test", as { rule }, or { problem } saying why it can't be one.
+// "shell:npm  test", as { rule }, or { problem } saying why it can't be one. An MCP server's tool
+// (mcp__<server>__<tool>) is allowed by its name.
 function parseRule(text) {
   const [, tool, scope] = text.trim().match(/^([^:]*?)\s*(?::\s*(.*))?$/s);
-  if (!TOOL_NAMES.has(tool)) return { problem: `"${text}" isn't a rule: it starts with a tool's name, like "shell: npm test" or "edit_file"` };
+  const known = TOOL_NAMES.has(tool) || /^mcp__[a-zA-Z0-9_-]+$/.test(tool);
+  if (!known) return { problem: `"${text}" isn't a rule: it starts with a tool's name, like "shell: npm test" or "edit_file"` };
   const words = scope?.trim().split(/\s+/).filter(Boolean).join(" ");
   if (tool === "shell" && !words) return { problem: `"${text}" needs the start of a command, like "shell: npm test"` };
   if (tool === "fetch_url" && !words) return { problem: `"${text}" needs a site, like "fetch_url: docs.python.org"` };
   return { rule: words ? `${tool}: ${words}` : tool };
 }
 
-// What each setting takes. `userOnly` ones only count in the user's own file.
+// An MCP server's settings (see mcp.mjs) as the agent starts it: { server }, or { problem }.
+function parseMcpServer(name, server) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(name)) return { problem: `the MCP server "${name}" needs a name of letters, digits, - and _` };
+  if (server?.url && !server.command) return { problem: `the MCP server "${name}" is at a URL: only servers started with a command work yet` };
+  if (typeof server?.command !== "string" || !server.command.trim()) return { problem: `the MCP server "${name}" needs a "command", like "npx"` };
+  const args = server.args ?? [];
+  if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string")) return { problem: `the MCP server "${name}"'s "args" should be a list of strings` };
+  const env = server.env ?? {};
+  if (typeof env !== "object" || Array.isArray(env) || !Object.values(env).every((value) => typeof value === "string")) {
+    return { problem: `the MCP server "${name}"'s "env" should be an object of strings, like { "TOKEN": "…" }` };
+  }
+  return { server: { command: server.command.trim(), args, env } };
+}
+
+// What each setting takes. `userOnly` ones only count in the user's own file, for the reason `why`.
 const SETTINGS = {
   model: { what: "a model ID, like claude-opus-5-5", check: (value) => typeof value === "string" && /^\S+$/.test(value) },
   effort: { what: `one of ${EFFORTS.join(", ")}`, check: (value) => EFFORTS.includes(value) },
@@ -45,6 +61,13 @@ const SETTINGS = {
     what: 'a list of rules, like ["shell: npm test", "edit_file"]',
     check: (value) => Array.isArray(value) && value.every((rule) => typeof rule === "string"),
     userOnly: true,
+    why: "a project's settings can't allow tool calls",
+  },
+  mcpServers: {
+    what: 'MCP servers by name, like { "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"] } }',
+    check: (value) => typeof value === "object" && value !== null && !Array.isArray(value),
+    userOnly: true,
+    why: "a project's settings can't start programs",
   },
 };
 
@@ -63,7 +86,8 @@ export function readSettingsFile(file, { user = false } = {}) {
   }
   let data;
   try {
-    data = JSON.parse(text.replace(/^﻿/, ""));
+    // Some Windows editors start a file with a byte order mark (U+FEFF), which isn't JSON.
+    data = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
   } catch (error) {
     return { found: true, settings: {}, problems: [`isn't valid JSON, so it isn't used: ${error.message}`] };
   }
@@ -78,7 +102,7 @@ export function readSettingsFile(file, { user = false } = {}) {
     if (!setting) {
       problems.push(`"${key}" isn't a setting; there are ${Object.keys(SETTINGS).join(", ")}`);
     } else if (setting.userOnly && !user) {
-      problems.push(`"${key}" only counts in your own ~/${USER_DIR}/${SETTINGS_FILE}: a project's settings can't allow tool calls`);
+      problems.push(`"${key}" only counts in your own ~/${USER_DIR}/${SETTINGS_FILE}: ${setting.why}`);
     } else if (!setting.check(value)) {
       problems.push(`"${key}" should be ${setting.what}`);
     } else if (key === "statusLine" && typeof value === "string" && !user) {
@@ -91,6 +115,14 @@ export function readSettingsFile(file, { user = false } = {}) {
         const { rule, problem } = parseRule(text);
         if (problem) problems.push(problem);
         else settings.allow.push(rule);
+      }
+    } else if (key === "mcpServers") {
+      settings.mcpServers = {};
+      for (const [name, config] of Object.entries(value)) {
+        if (config?.disabled === true) continue; // kept in the file, but not started
+        const { server, problem } = parseMcpServer(name, config);
+        if (problem) problems.push(problem);
+        else settings.mcpServers[name] = server;
       }
     } else {
       settings[key] = value;

@@ -28,6 +28,13 @@ describe("toolCallLine", () => {
     expect(plain(toolCallLine("read_file", "src/a.js (lines 1-20)", g))).toBe("● Read src/a.js (lines 1-20)");
     expect(plain(toolCallLine("new_tool", "", g))).toBe("● new_tool");
   });
+
+  it("names an MCP server's tool by the server and the tool", () => {
+    expect(plain(toolCallLine("mcp__github__create_issue", "", g))).toBe("● github/create_issue");
+    expect(plain(confirmPrompt("mcp__github__create_issue", {}, "mcp__github__create_issue", g, 120))).toBe(
+      "  ? Run github/create_issue? y/N · a = always allow github/create_issue calls › ",
+    );
+  });
 });
 
 describe("detailLines", () => {

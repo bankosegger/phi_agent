@@ -159,7 +159,7 @@ describe("helpLines", () => {
     expect(shown.some((line) => /^ {2}Ctrl\+C +Cancel the task/.test(line))).toBe(true);
     expect(shown).toContain("Tips");
     for (const line of shown) expect(displayWidth(line)).toBeLessThanOrEqual(59);
-    expect(shown).not.toContain("Your commands");
+    expect(shown.some((line) => /commands {2}/.test(line))).toBe(false);
   });
 
   it("lists the user's own commands, by name", () => {
@@ -168,16 +168,32 @@ describe("helpLines", () => {
       { name: "explain", description: "" },
     ];
     const shown = lines(helpLines(80, g, custom));
-    const at = shown.indexOf("Your commands");
-    expect(shown.slice(at, at + 3)).toEqual(["Your commands", `  ${"/explain".padEnd(13)}  `, `  ${"/review".padEnd(13)}  Review the changes for bugs`]);
+    const at = shown.indexOf("Your commands  ~/.phi-agent/commands");
+    expect(shown.slice(at, at + 3)).toEqual(["Your commands  ~/.phi-agent/commands", `  ${"/explain".padEnd(13)}  `, `  ${"/review".padEnd(13)}  Review the changes for bugs`]);
     expect(shown.indexOf("Commands")).toBeLessThan(at);
     expect(shown.indexOf("Keys")).toBeGreaterThan(at);
+  });
+
+  it("puts the project's commands and the user's own under the folders they come from", () => {
+    const custom = [
+      { name: "mine", description: "Mine", scope: "user" },
+      { name: "review", description: "Review the changes", argumentHint: "<file>", scope: "project" },
+      { name: "sum", description: "Sum up", model: "claude-haiku-5-5", scope: "project" },
+    ];
+    const shown = lines(helpLines(80, g, custom));
+    const project = shown.indexOf("Project commands  .phi-agent/commands");
+    const user = shown.indexOf("Your commands  ~/.phi-agent/commands");
+    expect(project).toBeGreaterThan(0);
+    expect(user).toBeGreaterThan(project);
+    // What to write after a command goes with its name; the model it runs with, after its description.
+    expect(shown.slice(project + 1, project + 3)).toEqual([`  ${"/review <file>".padEnd(14)}  Review the changes`, `  ${"/sum".padEnd(14)}  Sum up (claude-haiku-5-5)`]);
+    expect(shown[user + 1]).toBe(`  ${"/mine".padEnd(14)}  Mine`);
   });
 
   it("notes the command files that were skipped, and why", () => {
     const shown = lines(helpLines(80, g, [{ name: "review", description: "Review the changes" }], [{ file: ".phi-agent/commands/help.md", reason: "/help is a built-in command" }]));
     const at = shown.indexOf("Not used:");
-    expect(at).toBeGreaterThan(shown.indexOf("Your commands"));
+    expect(at).toBeGreaterThan(shown.indexOf("Your commands  ~/.phi-agent/commands"));
     expect(shown[at + 1]).toBe("  .phi-agent/commands/help.md — /help is a built-in command");
     expect(shown.indexOf("Keys")).toBeGreaterThan(at);
   });
@@ -194,8 +210,9 @@ describe("commandLines", () => {
     expect(shown).toEqual(["/explain", "from ~/.phi-agent/commands/explain.md", "", "Explain $ARGUMENTS"]);
   });
 
-  it("says which model the command runs with, when its file names one", () => {
-    const shown = lines(commandLines({ name: "summary", description: "Sum up", prompt: "Sum up the diff.", model: "claude-haiku-5-5" }, ".phi-agent/commands/summary.md"));
+  it("says which model the command runs with, and what to write after it, when its file says", () => {
+    const shown = lines(commandLines({ name: "summary", description: "Sum up", prompt: "Sum up $ARGUMENTS.", model: "claude-haiku-5-5", argumentHint: "<file>" }, ".phi-agent/commands/summary.md"));
+    expect(shown[0]).toBe("/summary <file>  Sum up");
     expect(shown[1]).toBe("from .phi-agent/commands/summary.md · runs with claude-haiku-5-5");
   });
 });

@@ -6,11 +6,12 @@ import { USER_DIR } from "./agent-core.mjs";
 // Your own slash commands: a prompt in a Markdown file, which /name runs as a task. A project's
 // commands are in its .phi-agent/commands folder, which git can share; your own, for all your
 // projects, are in ~/.phi-agent/commands. Where both have one of the same name, the project's
-// wins. A file can start with a description for /help, and the model to run the command with,
-// if not the one in use:
+// wins. A file can start with a description for /help, what to write after the command, and
+// the model to run the command with, if not the one in use:
 //
 //   ---
 //   description: Review the changes for bugs
+//   argument-hint: <file>
 //   model: claude-opus-5-5
 //   ---
 //   Review the uncommitted changes ...
@@ -21,6 +22,7 @@ import { USER_DIR } from "./agent-core.mjs";
 export const COMMANDS_FOLDER = "commands";
 const NAME = /^[a-z0-9][a-z0-9_-]*$/;
 const MAX_DESCRIPTION = 60;
+const MAX_ARGUMENT_HINT = 30;
 
 // The front matter's "name: value" lines, as { name: value }, names in lower case and values
 // without the quotes around them.
@@ -34,8 +36,9 @@ function frontMatterFields(text) {
 }
 
 /**
- * The command a file holds: its prompt, its description (or else its first line), and the
- * model to run it with, or null for the one in use.
+ * The command a file holds: its prompt, its description (or else its first line), the model to
+ * run it with (or null for the one in use), and its `argumentHint`, what to write after it, like
+ * "<file>", or null.
  */
 export function parseCommand(text) {
   let body = text.replaceAll("\r\n", "\n");
@@ -54,15 +57,17 @@ export function parseCommand(text) {
   if (description.length > MAX_DESCRIPTION) description = `${description.slice(0, MAX_DESCRIPTION - 1)}…`;
   // A model ID has no spaces: "model: the fast one" isn't one.
   const model = /^\S+$/.test(fields.model ?? "") ? fields.model : null;
-  return { prompt, description, model };
+  let argumentHint = fields["argument-hint"] || null;
+  if (argumentHint?.length > MAX_ARGUMENT_HINT) argumentHint = `${argumentHint.slice(0, MAX_ARGUMENT_HINT - 1)}…`;
+  return { prompt, description, model, argumentHint };
 }
 
 /**
  * The commands there are, as a Map from name (without the slash) to { name, prompt, description,
- * model, scope ("project" or "user"), file }. Names come from the file names, in lower case. Also
- * returns `skipped`: the .md files that aren't commands, each with its file and why — a name that
- * isn't a command name (like "my notes.md"), the name of one of `builtIn`, no prompt in it, or
- * another scope's file of the same name winning.
+ * model, argumentHint, scope ("project" or "user"), file }. Names come from the file names, in
+ * lower case. Also returns `skipped`: the .md files that aren't commands, each with its file and
+ * why — a name that isn't a command name (like "my notes.md"), the name of one of `builtIn`, no
+ * prompt in it, or another scope's file of the same name winning.
  */
 export function loadCommands({ cwd = process.cwd(), home = homedir(), builtIn = [] } = {}) {
   const commands = new Map();
@@ -96,14 +101,14 @@ export function loadCommands({ cwd = process.cwd(), home = homedir(), builtIn = 
       } catch {
         continue;
       }
-      const { prompt, description, model } = parseCommand(text);
+      const { prompt, description, model, argumentHint } = parseCommand(text);
       if (!prompt) {
         skipped.push({ name, scope, file, reason: "no prompt in it" });
         continue;
       }
       const existing = commands.get(name);
       if (existing) skipped.push({ name, scope: existing.scope, file: existing.file, reason: `the ${scope}'s ${name}.md wins` });
-      commands.set(name, { name, prompt, description, model, scope, file });
+      commands.set(name, { name, prompt, description, model, argumentHint, scope, file });
     }
   }
   return { commands, skipped };

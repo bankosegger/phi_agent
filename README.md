@@ -163,12 +163,15 @@ With an `anthropic/` model on OpenRouter, the agent marks the prompt for caching
 
 ### Your own commands
 
-A Markdown file `.phi-agent/commands/<name>.md` in the project (which git can share) or in `~/.phi-agent/commands` (for all your projects) is a command you run with `/<name>`, like `/review src/app.js`. Where both have one of the same name, the project's wins. A file can start with a one-line description, which `/help` shows, and the model to run the command with, if not the one in use:
+A Markdown file `.phi-agent/commands/<name>.md` in the project (which git can share) or in `~/.phi-agent/commands` (for all your projects) is a command you run with `/<name>`, like `/review src/app.js`. Where both have one of the same name, the project's wins. A file can start with a one-line description, what to write after the command, both of which `/help` shows, and the model to run the command with, if not the one in use:
 
     ---
     description: Review the changes for bugs
+    argument-hint: <file>
     model: claude-opus-5-5
     ---
+
+`/help` lists the project's commands and your own under the folders they come from, like `/review <file>  Review the changes for bugs (claude-opus-5-5)`.
 
 The model is for that one task: a cheap one for a quick `/summarize`, say, or a stronger one for `/review`. The conversation carries on with the model in use, and `/help <name>` says which model a command runs with. If the model's API key isn't set, the command runs with the model in use, and the agent says why.
 

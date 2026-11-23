@@ -255,13 +255,23 @@ function wrap(text, width) {
   return lines;
 }
 
-/** The /help text, as lines, with the user's own commands (see commands.mjs), if any, and the
- *  command files that were skipped, each with why. */
+// Where the user's own commands come from, by scope (see commands.mjs), as /help heads them.
+const COMMAND_SOURCES = [
+  ["project", "Project commands", ".phi-agent/commands"],
+  ["user", "Your commands", "~/.phi-agent/commands"],
+];
+
+/**
+ * The /help text, as lines, with the user's own commands (see commands.mjs), if any, under the
+ * folder they come from: each with what to write after it and the model it runs with, if its
+ * file says. Then the command files that were skipped, each with why.
+ */
 export function helpLines(columns, g = defaultGlyphs, custom = [], skipped = []) {
   const width = Math.min(lineWidth(columns), 100);
+  const usage = ({ name, argumentHint }) => `/${name}${argumentHint ? ` ${argumentHint}` : ""}`;
   const nameWidth = Math.max(
     ...COMMANDS.map(([name, args]) => displayWidth(`${name} ${args}`.trim())),
-    ...custom.map(({ name }) => Math.min(24, displayWidth(`/${name}`))),
+    ...custom.map((command) => Math.min(24, displayWidth(usage(command)))),
     ...KEYS.map(([key]) => key.length),
   );
   const entry = (name, description) => {
@@ -269,9 +279,18 @@ export function helpLines(columns, g = defaultGlyphs, custom = [], skipped = [])
     const [first = "", ...rest] = wrap(description, Math.max(20, width - nameWidth - 4));
     return [`${INDENT}${padEnd(name, nameWidth)}  ${first}`, ...rest.map((line) => `${INDENT}${" ".repeat(nameWidth)}  ${line}`)];
   };
-  const own = custom.length
-    ? [theme.strong("Your commands"), ...[...custom].sort((a, b) => (a.name < b.name ? -1 : 1)).flatMap(({ name, description }) => entry(theme.accent(`/${name}`), description)), ""]
-    : [];
+  const own = COMMAND_SOURCES.flatMap(([scope, title, folder]) => {
+    const commands = custom.filter((command) => (command.scope ?? "user") === scope).sort((a, b) => (a.name < b.name ? -1 : 1));
+    if (!commands.length) return [];
+    return [
+      `${theme.strong(title)}  ${theme.muted(folder)}`,
+      ...commands.flatMap(({ name, argumentHint, description, model }) => {
+        const shown = `${theme.accent(`/${name}`)}${argumentHint ? ` ${theme.muted(argumentHint)}` : ""}`;
+        return entry(shown, model ? `${description} (${model})`.trim() : description);
+      }),
+      "",
+    ];
+  });
   const notUsed = skipped.length
     ? [theme.muted("Not used:"), ...skipped.map(({ file, reason }) => `${INDENT}${theme.muted(`${file} — ${reason}`)}`), ""]
     : [];
@@ -297,11 +316,12 @@ export function helpLines(columns, g = defaultGlyphs, custom = [], skipped = [])
 
 /**
  * The /help <name> text, as lines: one of the user's own commands (see commands.mjs) in full,
- * with the model it runs with, if its file names one.
+ * with what to write after it and the model it runs with, if its file says.
  */
-export function commandLines({ name, description, prompt, model = null }, file) {
+export function commandLines({ name, description, prompt, model = null, argumentHint = null }, file) {
   const from = `from ${file}${model ? ` · runs with ${model}` : ""}`;
-  return [theme.accent(`/${name}`) + (description ? `  ${theme.muted(description)}` : ""), theme.muted(from), "", ...prompt.split("\n")];
+  const shown = `${theme.accent(`/${name}`)}${argumentHint ? ` ${theme.muted(argumentHint)}` : ""}`;
+  return [shown + (description ? `  ${theme.muted(description)}` : ""), theme.muted(from), "", ...prompt.split("\n")];
 }
 
 /** A line of markdown as plain text, for a preview: "## **Fixed** `add`" is "Fixed add". */

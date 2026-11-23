@@ -227,6 +227,7 @@ const KEYS = [
   ["Ctrl+C", "Cancel the task the agent is working on; at the prompt, clear what you typed, or quit"],
   ["Tab", "Complete commands, model names and file paths"],
   ["Up, Down", "Bring back what you entered before in this project"],
+  ["Ctrl+R", "Search what you entered before: type part of it, Ctrl+R again for older, Enter to run it, Tab to edit it, Esc to go back"],
 ];
 
 const TIPS = [

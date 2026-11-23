@@ -204,6 +204,125 @@ describe("createInput in a terminal", () => {
   });
 });
 
+describe("createInput's history search, with Ctrl+R", () => {
+  const CTRL_R = "\x12";
+  const CTRL_G = "\x07";
+  const CTRL_C = "\x03";
+  const LEFT = "\x1b[D";
+  // Newest first, as readline keeps it.
+  const history = ["run the tests", "fix the parser bug", "explain the build", "Fix the PARSER warnings"];
+
+  function setupSearch() {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let shown = "";
+    output.setEncoding("utf8").on("data", (text) => (shown += text));
+    const searchPrompt = (query, { found }) => `(${found ? "search" : "no match"}: ${query}) `;
+    const reader = createInput({ input, output, terminal: true, pasteWindowMs: 20, history, searchPrompt });
+    // What the terminal shows last: the prompt and line, as readline draws them again on each key,
+    // after moving the cursor to the start of the line (ESC[1G).
+    const showing = () => plain(shown.split(/\x1b\[1G|[\r\n]/).filter(Boolean).at(-1) ?? "");
+    return { input, reader, showing };
+  }
+
+  it("finds the newest line with what is typed, in any case, and enters it", async () => {
+    const { input, reader, showing } = setupSearch();
+    const next = reader.next(": ");
+    input.write(`${CTRL_R}`);
+    await wait(0);
+    expect(showing()).toBe("(search: ) ");
+    input.write("PARS");
+    await wait(0);
+    expect(showing()).toBe("(search: PARS) fix the parser bug");
+
+    // A query no line has keeps the line found last; taking a letter back finds lines again.
+    input.write("x");
+    await wait(0);
+    expect(showing()).toBe("(no match: PARSx) fix the parser bug");
+    input.write("\x7f"); // backspace
+    await wait(0);
+    expect(showing()).toBe("(search: PARS) fix the parser bug");
+
+    input.write("\r");
+    expect(await next).toBe("fix the parser bug");
+    reader.close();
+  });
+
+  it("finds older lines with Ctrl+R again, up to the oldest", async () => {
+    const { input, reader, showing } = setupSearch();
+    const next = reader.next(": ");
+    input.write(`${CTRL_R}parser${CTRL_R}`);
+    await wait(0);
+    expect(showing()).toBe("(search: parser) Fix the PARSER warnings");
+    input.write(CTRL_R);
+    await wait(0);
+    expect(showing()).toBe("(no match: parser) Fix the PARSER warnings");
+    input.write("\r");
+    expect(await next).toBe("Fix the PARSER warnings");
+    reader.close();
+  });
+
+  it("goes back to what was typed with Ctrl+G, Ctrl+C or Esc, and Ctrl+C doesn't interrupt", async () => {
+    const { input, reader, showing } = setupSearch();
+    const interrupts = [];
+    reader.onInterrupt(() => interrupts.push("Ctrl+C"));
+    const next = reader.next(": ");
+    input.write(`my draft${CTRL_R}build`);
+    await wait(0);
+    expect(showing()).toBe("(search: build) explain the build");
+
+    input.write(CTRL_G);
+    await wait(0);
+    expect(showing()).toBe(": my draft");
+    input.write(`${CTRL_R}tests${CTRL_C}`);
+    await wait(0);
+    expect(showing()).toBe(": my draft");
+    expect(interrupts).toEqual([]);
+    // A lone Esc is told apart from the start of an arrow key after a moment.
+    input.write(`${CTRL_R}tests\x1b`);
+    await wait(600);
+    expect(showing()).toBe(": my draft");
+
+    input.write("!\r");
+    expect(await next).toBe("my draft!");
+    reader.close();
+  });
+
+  it("keeps the line found to edit, with Tab or an arrow key", async () => {
+    const { input, reader } = setupSearch();
+    const first = reader.next(": ");
+    input.write(`${CTRL_R}explain\t again\r`);
+    expect(await first).toBe("explain the build again");
+
+    // An arrow key moves the cursor in the line found, as it would in a line typed.
+    const second = reader.next(": ");
+    input.write(`${CTRL_R}run${LEFT}X\r`);
+    expect(await second).toBe("run the testXs");
+    reader.close();
+  });
+
+  it("goes on with a search started while the agent worked, and leaves questions alone", async () => {
+    const { input, reader, showing } = setupSearch();
+    input.write(`${CTRL_R}build`);
+    await wait(0);
+    // The next prompt comes while searching: the search stays, and ends with that prompt.
+    const next = reader.next(": ");
+    await wait(0);
+    expect(showing()).toBe("(search: build) explain the build");
+    input.write(CTRL_G);
+    await wait(0);
+    expect(showing()).toBe(": ");
+    input.write("\r");
+    expect(await next).toBe("");
+
+    // At a question, Ctrl+R doesn't search: the answer is what is typed.
+    const answer = reader.ask("[confirm] ");
+    input.write(`${CTRL_R}y\r`);
+    expect(await answer).toBe("y");
+    reader.close();
+  });
+});
+
 describe("createInput with piped input", () => {
   it("reads a line per input, answers questions in order, and ends with null", async () => {
     const { input, reader, queued } = setup({ terminal: false });

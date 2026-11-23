@@ -128,6 +128,7 @@ With an `anthropic/` model on OpenRouter, the agent marks the prompt for caching
 | `/exit`, `/quit` | Quit |
 | Ctrl+C while the agent works | Cancel the current task and return to the prompt |
 | Ctrl+C at the prompt | Clear what you typed; with nothing typed, quit (Ctrl+D quits too) |
+| Ctrl+R at the prompt | Search what you entered before (see below) |
 | `y`, `n` or `a` when asked to confirm (`? Run this command? y/N …`) | Run the tool call, skip it, or run it and allow calls like it for good in this project (see [Permissions](#permissions)) |
 
 ### Your own commands
@@ -148,6 +149,8 @@ A cancelled task keeps the conversation usable: any tool calls it had started ar
 You can type while the agent works: a message you enter then runs after the current task, unless you cancel the task with Ctrl+C. Pasting several lines sends them as one message, so a pasted error message is one task, not one per line. To type a message of several lines, end each line but the last with `\`; it goes on after a `…` prompt.
 
 Tab completes commands, model IDs after `/model`, and file paths. The up arrow brings back what you entered before, in this project too, as it is saved in `.agent/history`. Answers to confirmation questions, and the lines of a message of several, stay out of it.
+
+Ctrl+R searches that history: type part of an earlier message, in any case, and the newest one with it shows after `search:`. Ctrl+R again finds an older one, Enter runs the one found, Tab or an arrow key keeps it to edit first, and Esc (or Ctrl+G, or Ctrl+C) goes back to what you had typed.
 
 When the agent needs you after working a while, at a confirmation after 10 seconds or at the end of a task that took 30, it rings the terminal's bell, which can flash the window or mark its tab. `BELL=off` in `.env` silences it.
 

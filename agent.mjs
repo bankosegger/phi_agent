@@ -317,6 +317,8 @@ if (!HEADLESS) {
       }),
     // A line ended with "\" goes on in the next one.
     continuationPrompt: `${theme.muted(glyphs.continued)} `,
+    // Ctrl+R searches what was entered before: "search: pars ❯ fix the parser".
+    searchPrompt: (query, { found }) => `${found ? theme.muted("search:") : theme.warning("no match:")} ${query} ${theme.accent(glyphs.prompt)} `,
   });
   userInput.onInterrupt(() => {
     // At the prompt, Ctrl+C throws away what was typed, and with nothing typed, quits.

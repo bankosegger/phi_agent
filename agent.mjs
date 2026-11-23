@@ -32,6 +32,7 @@ import { previewToolCall, previewToolResult } from "./src/preview.mjs";
 import { backgroundProcesses } from "./src/processes.mjs";
 import { PERMISSIONS_FILE, allows, loadRules, ruleFor, saveRules } from "./src/permissions.mjs";
 import { runInSandbox } from "./src/sandbox.mjs";
+import { loadSettings } from "./src/settings.mjs";
 import { deleteSession, listSessions, loadHistory, loadSession, newSessionFile, saveHistory, saveSession, searchSessions } from "./src/sessions.mjs";
 import { createStatus } from "./src/status.mjs";
 import { displayWidth, glyphs, hasColors, theme, truncateEnd } from "./src/theme.mjs";
@@ -93,6 +94,10 @@ if (options.version) {
 // (Starting the sandbox needs to know too, before anything else is set up.)
 const HEADLESS = options.print || options.json; // --json implies --print
 
+// Settings files (see settings.mjs): the project's .phi-agent/settings.json over the user's own
+// ~/.phi-agent/settings.json, and both over .env. Options on the command line win over them.
+const { settings, from: settingsFrom, files: settingsFiles, problems: settingsProblems } = loadSettings();
+
 // OpenRouter's key is for the models it has, like openai/gpt-4o-mini; Anthropic's for Claude
 // models through the Claude API, like claude-opus-5-5. Either will do, or both.
 if (!process.env.OPENROUTER_API_KEY && !process.env.ANTHROPIC_API_KEY) {
@@ -118,18 +123,20 @@ function keyProblem(name) {
   return null;
 }
 
-let model = options.model || process.env.MODEL || (openai ? DEFAULT_MODEL : DEFAULT_CLAUDE_MODEL);
+let model = options.model || settings.model || process.env.MODEL || (openai ? DEFAULT_MODEL : DEFAULT_CLAUDE_MODEL);
 if (keyProblem(model)) {
-  console.error(theme.danger(keyProblem(model)));
+  const from = !options.model && settings.model ? ` The model is set in ${settingsFrom.model}.` : "";
+  console.error(theme.danger(`${keyProblem(model)}${from}`));
   process.exit(1);
 }
 
-// With --sandbox (or SANDBOX=docker in .env), this process only starts the agent in a Docker
-// container, attached to this terminal, and exits with its exit code.
+// With --sandbox (or SANDBOX=docker in .env, or "sandbox": true in a settings file), this process
+// only starts the agent in a Docker container, attached to this terminal, and exits with its
+// exit code.
 const IN_SANDBOX = process.env.PHI_AGENT_SANDBOX === "1";
 // `npm run agent --sandbox`, without the "--", leaves the flag to npm, which passes it on as
 // npm_config_sandbox. Honor it rather than run outside the sandbox the user asked for.
-const sandboxRequested = options.sandbox || process.env.SANDBOX === "docker" || process.env.npm_config_sandbox === "true";
+const sandboxRequested = options.sandbox || settings.sandbox || process.env.SANDBOX === "docker" || process.env.npm_config_sandbox === "true";
 if (!IN_SANDBOX && sandboxRequested) {
   process.exit(
     await runInSandbox({
@@ -144,12 +151,16 @@ if (!IN_SANDBOX && sandboxRequested) {
   );
 }
 
-// EFFORT in .env: how much Claude models think through the Claude API, from low to max. Unset,
-// each model thinks as much as it does by default.
-const effort = EFFORTS.find((level) => level === process.env.EFFORT?.trim().toLowerCase()) ?? null;
-if (process.env.EFFORT?.trim() && !effort) {
+// What is wrong in the settings files, said once: by the agent in the sandbox, if there is one.
+for (const problem of settingsProblems) console.error(theme.warning(`${glyphs.warn} ${problem}`));
+
+// "effort" in a settings file, or EFFORT in .env: how much Claude models think through the Claude
+// API, from low to max. Unset, each model thinks as much as it does by default.
+const envEffort = EFFORTS.find((level) => level === process.env.EFFORT?.trim().toLowerCase()) ?? null;
+if (!settings.effort && process.env.EFFORT?.trim() && !envEffort) {
   console.error(theme.warning(`${glyphs.warn} EFFORT=${process.env.EFFORT} isn't a level Claude knows (${EFFORTS.join(", ")}), so each model uses its default.`));
 }
+const effort = settings.effort ?? envEffort;
 
 // For Tab completion.
 const COMMANDS = ["/help", "/clear", "/resume", "/compact", "/undo", "/plan", "/model", "/processes", "/stop", "/permissions", "/exit", "/quit"];
@@ -481,18 +492,22 @@ function showNotice(notice) {
 
 // The terminal's bell, which can flash the window or mark its tab, rings when the agent needs
 // the user after working for a while, since they may have turned to something else: at a
-// confirmation, or at the end of a long task. BELL=off in .env silences it.
+// confirmation, or at the end of a long task. "bell": false in a settings file, or BELL=off in
+// .env, silences it.
 const BELL_AFTER_CONFIRM_MS = 10_000;
 const BELL_AFTER_TASK_MS = 30_000;
+const BELL_ON = settings.bell ?? process.env.BELL !== "off";
 let taskStartedAt = 0;
 
 function bell() {
-  if (output.isTTY && !HEADLESS && process.env.BELL !== "off") output.write("\x07");
+  if (output.isTTY && !HEADLESS && BELL_ON) output.write("\x07");
 }
 
 // Tool calls allowed for good in this project (see permissions.mjs). A rule the user adds is
-// saved, or if it can't be, kept until the agent quits.
+// saved, or if it can't be, kept until the agent quits. The user's own settings can allow tool
+// calls in all their projects too ("allow" in ~/.phi-agent/settings.json).
 let rules = loadRules();
+const settingsRules = settings.allow ?? [];
 
 function describeRule(rule) {
   if (rule.startsWith("shell: ")) return `commands that start with "${rule.slice(7)}" run`;
@@ -511,7 +526,7 @@ function allowForGood(rule) {
 }
 
 async function confirmTool(name, args, signal) {
-  if (!needsConfirmation(name, args) || options.yes || allows(rules, name, args)) return true;
+  if (!needsConfirmation(name, args) || options.yes || allows([...rules, ...settingsRules], name, args)) return true;
   // A command that chains others, one that does damage that can't be undone, or reading a file
   // that may hold secrets, has no "always".
   const rule = ruleFor(name, args);
@@ -554,8 +569,14 @@ function permissions(argument) {
   }
 
   if (options.yes) print(warning("--yes is on: every tool call runs without asking."));
+  if (settingsRules.length) {
+    print(theme.strong(`Runs without asking in all your projects, from ${settingsFrom.allow}`));
+    printLines(settingsRules.map((rule) => `  ${theme.muted(glyphs.bullet)} ${describeRule(rule)}`));
+    print(info("Change these in that file."));
+    if (rules.length) print();
+  }
   if (!rules.length) {
-    print(info('Nothing runs without asking yet. Answer "a" at a confirmation to allow something for good.'));
+    if (!settingsRules.length) print(info('Nothing runs without asking yet. Answer "a" at a confirmation to allow something for good.'));
     return;
   }
   print(theme.strong("Runs without asking in this project"));
@@ -593,8 +614,10 @@ function showFooter(usage, startedAt) {
 }
 
 // How the agent reaches a model (by default, the one in use), for agentTurn and compactMessages.
+// `maxRounds` ("maxToolRounds" in a settings file) is for agentTurn: unset, it takes
+// MAX_TOOL_ROUNDS from .env, or its default.
 function modelOptions(name = model) {
-  return { openai, claude, model: name, sessionId, modelInfo: aboutModel(name), effort, canSeeImages: canSeeImages(name) };
+  return { openai, claude, model: name, sessionId, modelInfo: aboutModel(name), effort, canSeeImages: canSeeImages(name), maxRounds: settings.maxToolRounds };
 }
 
 function showError(error, signal) {
@@ -1207,7 +1230,7 @@ async function handleInput(line) {
 async function runInteractive() {
   printLines(
     banner(
-      { version: VERSION, model, project: shownPath(projectDir), following, sandbox: IN_SANDBOX, plan: planMode, yes: options.yes },
+      { version: VERSION, model, project: shownPath(projectDir), following, settings: settingsFiles, sandbox: IN_SANDBOX, plan: planMode, yes: options.yes },
       output.columns,
     ),
   );

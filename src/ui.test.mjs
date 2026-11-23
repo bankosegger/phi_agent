@@ -129,6 +129,12 @@ describe("banner", () => {
     expect(new Set(shown.map(displayWidth)).size).toBe(1); // a straight box
   });
 
+  it("names the settings files in use, if any", () => {
+    const shown = lines(banner({ ...about, settings: [".phi-agent/settings.json", "~/.phi-agent/settings.json"] }, 100, g)).join("\n");
+    expect(shown).toContain("settings  .phi-agent/settings.json, ~/.phi-agent/settings.json");
+    expect(lines(banner(about, 100, g)).join("\n")).not.toContain("settings");
+  });
+
   it("says when the agent may do more, or less, than usual", () => {
     const shown = lines(banner({ ...about, sandbox: true, plan: true, yes: true }, 100, g)).join("\n");
     expect(shown).toContain("sandbox  Docker, with the project at /workspace");

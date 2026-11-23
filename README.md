@@ -25,6 +25,8 @@ MODEL=openai/gpt-4o-mini
 # SANDBOX=docker
 ```
 
+These settings, except the keys, can also be set for one project, or in a settings file of your own: see [Settings](#settings).
+
 ## Run
 
 Interactive:
@@ -90,6 +92,34 @@ For more `docker run` options, like limits on memory and CPU, set `SANDBOX_DOCKE
 If the project has an `AGENTS.md` file, the agent follows it. Put in it what you would otherwise repeat in every task: how to build and run the tests, code conventions, folders to leave alone. It is read when the agent starts and again on `/clear`, and the banner says when one is in use.
 
 For what applies to all your projects, like how you like answers or what your machine has installed, write an `AGENTS.md` in a `.phi-agent` folder in your home folder (`~/.phi-agent/AGENTS.md`). The agent follows both; where they disagree, the project's wins. In the Docker sandbox, the folder is mounted read-only, so the agent reads it there too.
+
+### Settings
+
+Settings for one project go in its `.phi-agent/settings.json`, which git can share, and settings for all your projects in `~/.phi-agent/settings.json`:
+
+```json
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "maxToolRounds": 40,
+  "sandbox": true,
+  "bell": false,
+  "allow": ["shell: npm test", "fetch_url: docs.python.org"]
+}
+```
+
+| Setting | Effect | Instead of |
+| --- | --- | --- |
+| `model` | The model to start with (see [Models](#models)) | `MODEL` |
+| `effort` | How much Claude models think: `low`, `medium`, `high`, `xhigh` or `max` | `EFFORT` |
+| `maxToolRounds` | Model requests per task before the agent stops | `MAX_TOOL_ROUNDS` |
+| `sandbox` | `true` runs the agent in the [Docker sandbox](#docker-sandbox) | `SANDBOX=docker` |
+| `bell` | `false` silences the terminal's bell | `BELL=off` |
+| `allow` | Tool calls that run without asking, as [permission rules](#permissions) — only in your own file | answering `a` |
+
+The project's settings win over yours, and both win over `.env`; options on the command line, like `--model`, win over all of them. The banner names the settings files in use, and the agent says what it can't use in one, like a misspelled setting, and uses the rest. They are read when the agent starts.
+
+Anyone can commit a project's settings, so they can't loosen what you decided: only your own file can allow tool calls, and a project's `"sandbox": false` doesn't turn off a sandbox asked for anywhere else. `/permissions` lists your own file's rules with the project's.
 
 ## Models
 
@@ -188,7 +218,7 @@ Answering `a` when asked to confirm a tool call allows calls like that one for g
 
 Some commands always ask: ones that chain or start other commands, or redirect output (`&&`, `;`, `|`, `>`, `$(…)`), since a rule for `npm test` mustn't let `npm test && rm -rf ~` through, and ones whose damage can't be undone, like `rm`, `sudo`, `chmod` or `kill`.
 
-The rules are saved in `.agent/permissions.json`. `/permissions` lists them, and `/permissions remove <n>` takes one back.
+The rules are saved in `.agent/permissions.json`. `/permissions` lists them, and `/permissions remove <n>` takes one back. Rules for all your projects go in `"allow"` in your own `~/.phi-agent/settings.json` (see [Settings](#settings)), written the same way: `"shell: npm test"`, `"fetch_url: docs.python.org"`, or a tool's name, like `"edit_file"`.
 
 ### Saved conversations
 

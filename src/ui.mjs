@@ -179,14 +179,16 @@ export function taskFooter({ elapsed, usage, sessionCost = 0, sessionEstimated =
 
 /**
  * The banner the CLI starts with: the model, the project folder, the instructions it follows,
- * and any mode that changes what the agent may do. In a box if the terminal is wide enough.
+ * the settings files it uses, and any mode that changes what the agent may do. In a box if the
+ * terminal is wide enough.
  */
-export function banner({ version, model, project, following = [], sandbox = false, plan = false, yes = false }, columns, g = defaultGlyphs) {
+export function banner({ version, model, project, following = [], settings = [], sandbox = false, plan = false, yes = false }, columns, g = defaultGlyphs) {
   const title = `${theme.accent(g.tool)} ${theme.strong("Tiny Agent")}${version ? ` ${theme.muted(`v${version}`)}` : ""}`;
   const rows = [
     ["model", model],
     ["project", project],
     following.length && ["follows", following.join(", ")],
+    settings.length && ["settings", settings.join(", ")],
     sandbox && ["sandbox", "Docker, with the project at /workspace"],
     plan && ["mode", theme.plan("plan: looks around and changes nothing")],
     yes && ["approve", theme.warning("everything, without asking (--yes)")],
